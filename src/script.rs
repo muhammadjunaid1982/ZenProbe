@@ -111,7 +111,7 @@ function setTimeout(fn, ms, ...args) { __sleepSync(ms); Promise.resolve().then((
 function clearTimeout() {}
 function require(name) {
   if (name === 'chai') return { expect, assert, AssertionError };
-  throw new Error(`require('${name}') is not available in ZenBruno scripts`);
+  throw new Error(`require('${name}') is not available in ZenProbe scripts`);
 }
 "#;
 

@@ -94,7 +94,7 @@ pub struct Request {
     pub docs: String,
     /// timeout, followRedirects, maxRedirects, encodeUrl, keepAliveInterval, ...
     pub settings: Vec<Pair>,
-    /// Format-specific data ZenBruno does not model, kept so saving loses nothing.
+    /// Format-specific data ZenProbe does not model, kept so saving loses nothing.
     pub keep: Keep,
 }
 

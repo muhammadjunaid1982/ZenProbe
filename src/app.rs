@@ -213,7 +213,13 @@ pub struct ZenApp {
 
 fn state_file() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("ZenBruno").join("state.json")
+    let file = base.join("ZenProbe").join("state.json");
+    // one-time carry-over from the app's previous name
+    let old = base.join("ZenBruno").join("state.json");
+    if !file.exists() && old.exists() && std::fs::create_dir_all(base.join("ZenProbe")).is_ok() {
+        let _ = std::fs::copy(&old, &file);
+    }
+    file
 }
 
 fn now_hms() -> String {
@@ -278,7 +284,7 @@ impl ZenApp {
             }
         }
         app.current_root = app.collections.first().map(|c| c.root.clone());
-        // `zenbruno <collection dir | request file>` opens it (also used by "Open with")
+        // `zenprobe <collection dir | request file>` opens it (also used by "Open with")
         for arg in std::env::args().skip(1) {
             let path = std::fs::canonicalize(&arg).map(|p| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\"))).unwrap_or_else(|_| PathBuf::from(&arg));
             let root = path.ancestors().find(|d| d.join("bruno.json").exists() || d.join("opencollection.yml").exists()).map(Path::to_path_buf);
@@ -1989,7 +1995,7 @@ fn auth_editor(ui: &mut egui::Ui, auth: &mut crate::model::Auth, allow_inherit: 
         }
         "none" => {}
         _ if !known => {
-            ui.label(RichText::new(format!("`{}` auth is kept in the file but not applied by ZenBruno.", auth.mode)).color(MUTED));
+            ui.label(RichText::new(format!("`{}` auth is kept in the file but not applied by ZenProbe.", auth.mode)).color(MUTED));
             ui.end_row();
         }
         _ => {}
@@ -2586,7 +2592,7 @@ impl eframe::App for ZenApp {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&self.status).size(11.5).color(Color32::from_rgb(110, 110, 110)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(concat!("ZenBruno v", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED));
+                    ui.label(RichText::new(concat!("ZenProbe v", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED));
                 });
             });
         });

@@ -1,11 +1,11 @@
 [package]
-name = "zenbruno-setup"
-version = "0.1.0"
+name = "zenprobe-setup"
+version = "0.2.0"
 edition = "2024"
 build = "build.rs"
-description = "Per-user Windows installer for ZenBruno"
+description = "Per-user Windows installer for ZenProbe"
 license = "MIT"
-repository = "https://github.com/muhammadjunaid1982/ZenBruno"
+repository = "https://github.com/muhammadjunaid1982/ZenProbe"
 publish = false
 
 [dependencies]

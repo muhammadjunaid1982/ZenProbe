@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn full_pipeline_with_scripts_vars_asserts_tests() {
         let (addr, server) = serve(1);
-        let dir = std::env::temp_dir().join(format!("zenbruno-exec-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zenprobe-exec-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut c = Collection::create(&dir, "Demo", crate::model::Format::Yaml).unwrap();
         let mut root = c.load_folder(&dir);
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn multipart_and_graphql_bodies() {
         let (addr, server) = serve(2);
-        let dir = std::env::temp_dir().join(format!("zenbruno-exec2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zenprobe-exec2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut c = Collection::create(&dir, "Demo", crate::model::Format::Bru).unwrap();
         std::fs::write(dir.join("upload.txt"), "FILEDATA").unwrap();

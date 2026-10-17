@@ -1,15 +1,15 @@
-# ZenBruno
+# ZenProbe
 
 **A fast, native API client for [Bruno](https://www.usebruno.com/) collections — written in Rust.**
 
-ZenBruno opens your existing Bruno collections (both the classic `.bru` format and the newer
+ZenProbe opens your existing Bruno collections (both the classic `.bru` format and the newer
 OpenCollection YAML format) and lets you send, script, test and load-test requests from a
 lightweight desktop app with a Bruno-style interface. No Electron, no Node.js — a single
 native executable.
 
 ![Request view](docs/screenshots/request.png)
 
-> ZenBruno is an independent project and is not affiliated with Bruno. See
+> ZenProbe is an independent project and is not affiliated with Bruno. See
 > [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Features
@@ -63,12 +63,12 @@ native executable.
 
 ## Install
 
-Download `ZenBruno-Setup-<version>.exe` from the
-[Releases](https://github.com/muhammadjunaid1982/ZenBruno/releases) page and run it.
+Download `ZenProbe-Setup-<version>.exe` from the
+[Releases](https://github.com/muhammadjunaid1982/ZenProbe/releases) page and run it.
 
-- Installs per user to `%LOCALAPPDATA%\Programs\ZenBruno` — no administrator rights needed
+- Installs per user to `%LOCALAPPDATA%\Programs\ZenProbe` — no administrator rights needed
 - Adds Start Menu and Desktop shortcuts and an entry in *Settings → Apps*
-- Silent install: `ZenBruno-Setup-<version>.exe /S`
+- Silent install: `ZenProbe-Setup-<version>.exe /S`
 - Uninstall from *Settings → Apps* (your collections are never touched)
 
 The installer is not code-signed yet, so Windows SmartScreen may show *"Windows protected your
@@ -80,18 +80,18 @@ Requirements: Windows 10/11, [Rust](https://rustup.rs/) 1.88+ and the MSVC build
 (installed with Visual Studio Build Tools / rustup's default MSVC toolchain).
 
 ```powershell
-git clone https://github.com/muhammadjunaid1982/ZenBruno.git
-cd ZenBruno
+git clone https://github.com/muhammadjunaid1982/ZenProbe.git
+cd ZenProbe
 cargo run --release          # run the app
 cargo test --release         # run the test suite
-.\build-installer.ps1        # build dist\ZenBruno-Setup-<version>.exe
+.\build-installer.ps1        # build dist\ZenProbe-Setup-<version>.exe
 ```
 
 Open a collection directly from the command line:
 
 ```powershell
-zenbruno.exe "C:\path\to\collection"
-zenbruno.exe "C:\path\to\collection\folder\request.yml"
+zenprobe.exe "C:\path\to\collection"
+zenprobe.exe "C:\path\to\collection\folder\request.yml"
 ```
 
 ## Keyboard shortcuts
@@ -135,9 +135,9 @@ expand it.
 
 - **[REA](https://github.com/morluto/rea)** (`rea-agents`) — the reverse-engineering toolkit used to
   analyze the shipped Bruno desktop app (its Electron `app.asar` inventory and runtime behaviour) so
-  ZenBruno could match Bruno's file formats, request pipeline and user interface.
+  ZenProbe could match Bruno's file formats, request pipeline and user interface.
 - **[Bruno](https://github.com/usebruno/bruno)** — the original open-source API client whose MIT-licensed
-  formats and behaviour ZenBruno reimplements.
+  formats and behaviour ZenProbe reimplements.
 - **[egui / eframe](https://github.com/emilk/egui)**, **[boa](https://github.com/boa-dev/boa)**,
   **[reqwest](https://github.com/seanmonstar/reqwest)**, **[tonic](https://github.com/hyperium/tonic)**,
   **[protox](https://github.com/andrewhickman/protox)** and

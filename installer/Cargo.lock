@@ -501,8 +501,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "zenbruno-setup"
-version = "0.1.0"
+name = "zenprobe-setup"
+version = "0.2.0"
 dependencies = [
  "rfd",
 ]

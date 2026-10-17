@@ -26,5 +26,5 @@ jobs:
         run: ./build-installer.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: ZenBruno-Setup
+          name: ZenProbe-Setup
           path: dist/*.exe

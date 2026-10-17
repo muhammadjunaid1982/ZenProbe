@@ -2,11 +2,11 @@
 
 ## Bruno
 
-ZenBruno is an independent reimplementation and is not affiliated with or endorsed
+ZenProbe is an independent reimplementation and is not affiliated with or endorsed
 by the Bruno project or Bruno Software Inc. "Bruno" is used only to describe file-format
 compatibility.
 
-ZenBruno's `.bru` grammar handling, OpenCollection YAML mapping, variable interpolation,
+ZenProbe's `.bru` grammar handling, OpenCollection YAML mapping, variable interpolation,
 script ordering, auth inheritance and cURL/URL behaviour were ported from Bruno's
 MIT-licensed source (`@usebruno/lang`, `@usebruno/filestore`, `@usebruno/common` and the
 Bruno Electron app). Bruno's license:
@@ -37,7 +37,7 @@ SOFTWARE.
 
 ## Rust crates
 
-ZenBruno links many open-source crates (egui/eframe, boa, reqwest, tonic, prost,
+ZenProbe links many open-source crates (egui/eframe, boa, reqwest, tonic, prost,
 protox, tungstenite, serde, tokio and their dependencies), each under its own license
 (mostly MIT and/or Apache-2.0). Run `cargo tree` to list them, or
 [`cargo about`](https://github.com/EmbarkStudios/cargo-about) to generate a full

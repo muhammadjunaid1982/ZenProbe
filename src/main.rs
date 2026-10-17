@@ -17,11 +17,11 @@ mod yml;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1440.0, 880.0]).with_min_inner_size([900.0, 560.0]).with_title("ZenBruno"),
+        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1440.0, 880.0]).with_min_inner_size([900.0, 560.0]).with_title("ZenProbe"),
         ..Default::default()
     };
     eframe::run_native(
-        "ZenBruno",
+        "ZenProbe",
         options,
         Box::new(|cc| {
             ui::setup(&cc.egui_ctx);

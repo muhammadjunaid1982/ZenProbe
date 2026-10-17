@@ -1,5 +1,5 @@
 //! `.bru` file format, mirroring Bruno's `@usebruno/lang` v2 grammar (bruToJson / jsonToBru).
-//! Blocks ZenBruno does not model are kept verbatim so saving never loses data.
+//! Blocks ZenProbe does not model are kept verbatim so saving never loses data.
 
 use crate::model::{Auth, Environment, FolderSettings, Message, Pair, Request};
 
@@ -16,7 +16,7 @@ pub enum Body {
 pub struct Block {
     pub name: String,
     pub body: Body,
-    /// Exact source text of the block, re-emitted for blocks ZenBruno does not model.
+    /// Exact source text of the block, re-emitted for blocks ZenProbe does not model.
     pub raw: String,
 }
 

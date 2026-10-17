@@ -1,6 +1,6 @@
 //! OpenCollection YAML format (opencollection.yml, *.yml requests, folder.yml, environments/*.yml),
 //! mirroring @usebruno/filestore `formats/yml`. Writing edits the original document in place so
-//! examples, config and other keys ZenBruno does not model are preserved.
+//! examples, config and other keys ZenProbe does not model are preserved.
 
 use crate::model::{Auth, Environment, FolderSettings, Keep, Message, Pair, Request};
 use serde_yaml::{Mapping, Value};
@@ -130,7 +130,7 @@ fn parse_auth(v: &Value) -> Auth {
     }
 }
 
-/// Modes ZenBruno doesn't edit (oauth2, digest, ...) keep the original value untouched.
+/// Modes ZenProbe doesn't edit (oauth2, digest, ...) keep the original value untouched.
 fn write_auth(m: &mut Mapping, auth: &Auth) {
     let v = match auth.mode.as_str() {
         "none" | "" => None,
@@ -208,7 +208,7 @@ const BINARY: &[&str] = &["eq", "neq", "gt", "gte", "lt", "lte", "in", "notIn", 
 fn write_runtime(m: &mut Mapping, r: &Runtime) {
     set(m, "variables", kv_value(&r.vars_req));
 
-    // keep actions/scripts of kinds ZenBruno does not model
+    // keep actions/scripts of kinds ZenProbe does not model
     let mut actions: Vec<Value> = m
         .get("actions")
         .and_then(Value::as_sequence)

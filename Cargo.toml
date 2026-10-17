@@ -1,14 +1,14 @@
 [package]
-name = "zenbruno"
-version = "0.1.0"
+name = "zenprobe"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Muhammad Junaid"]
 description = "A fast native API client compatible with Bruno collections (.bru and OpenCollection YAML), written in Rust."
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/muhammadjunaid1982/ZenBruno"
-homepage = "https://github.com/muhammadjunaid1982/ZenBruno"
+repository = "https://github.com/muhammadjunaid1982/ZenProbe"
+homepage = "https://github.com/muhammadjunaid1982/ZenProbe"
 keywords = ["api-client", "bruno", "http", "grpc", "load-testing"]
 categories = ["development-tools", "gui", "web-programming::http-client"]
 exclude = ["/installer", "/handoff", "/dist", "/docs", "/.github"]

@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn proto_file_methods_and_sample() {
-        let dir = std::env::temp_dir().join(format!("zenbruno-proto-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zenprobe-proto-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let proto = dir.join("hello.proto");
         std::fs::write(&proto, "syntax = \"proto3\";\npackage demo;\nimport \"google/protobuf/timestamp.proto\";\nmessage Req { string name = 1; int32 n = 2; google.protobuf.Timestamp at = 3; }\nmessage Res { string msg = 1; }\nservice Greeter {\n  rpc Hello (Req) returns (Res);\n  rpc Chat (stream Req) returns (stream Res);\n}\n").unwrap();

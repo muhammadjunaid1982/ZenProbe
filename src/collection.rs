@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn file_operations_both_formats() {
         for format in [Format::Bru, Format::Yaml] {
-            let dir = std::env::temp_dir().join(format!("zenbruno-ops-{}-{:?}", std::process::id(), format));
+            let dir = std::env::temp_dir().join(format!("zenprobe-ops-{}-{:?}", std::process::id(), format));
             let _ = std::fs::remove_dir_all(&dir);
             let mut c = Collection::create(&dir, "Demo", format).unwrap();
             assert_eq!(Collection::open(&dir).unwrap().name, "Demo");

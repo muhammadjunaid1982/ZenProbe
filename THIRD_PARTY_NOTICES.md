@@ -3,8 +3,10 @@
 ## Bruno
 
 ZenProbe is an independent reimplementation and is not affiliated with or endorsed
-by the Bruno project or Bruno Software Inc. "Bruno" is used only to describe file-format
-compatibility.
+by the Bruno project or Bruno Software Inc. `Bruno` is a trademark held by
+[Anoop M D](https://www.helloanoop.com/) (see the
+[Bruno README](https://github.com/usebruno/bruno#trademark)); it is used here only to
+describe file-format compatibility. ZenProbe does not use the Bruno logo.
 
 ZenProbe's `.bru` grammar handling, OpenCollection YAML mapping, variable interpolation,
 script ordering, auth inheritance and cURL/URL behaviour were ported from Bruno's

@@ -9,7 +9,8 @@ native executable.
 
 ![Request view](docs/screenshots/request.png)
 
-> ZenProbe is an independent project and is not affiliated with Bruno. See
+> ZenProbe is an independent project and is not affiliated with or endorsed by Bruno.
+> "Bruno" is a trademark of Anoop M D, used here only to describe compatibility. See
 > [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Features

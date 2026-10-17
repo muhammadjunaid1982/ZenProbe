@@ -1,0 +1,4 @@
+# Keep LF everywhere: tests embed .bru/.yml fixtures in raw strings that must not gain \r
+* text=auto eol=lf
+*.png binary
+*.exe binary

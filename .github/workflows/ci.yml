@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            installer
+      - name: Test
+        run: cargo test --release
+      - name: Build installer
+        shell: pwsh
+        run: ./build-installer.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZenBruno-Setup
+          path: dist/*.exe

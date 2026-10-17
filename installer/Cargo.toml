@@ -1,0 +1,16 @@
+[package]
+name = "zenbruno-setup"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+description = "Per-user Windows installer for ZenBruno"
+license = "MIT"
+repository = "https://github.com/muhammadjunaid1982/ZenBruno"
+publish = false
+
+[dependencies]
+rfd = "0.17.2"
+
+[profile.release]
+strip = true
+opt-level = "z"

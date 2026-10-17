@@ -1,0 +1,39 @@
+[package]
+name = "zenbruno"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Muhammad Junaid"]
+description = "A fast native API client compatible with Bruno collections (.bru and OpenCollection YAML), written in Rust."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/muhammadjunaid1982/ZenBruno"
+homepage = "https://github.com/muhammadjunaid1982/ZenBruno"
+keywords = ["api-client", "bruno", "http", "grpc", "load-testing"]
+categories = ["development-tools", "gui", "web-programming::http-client"]
+exclude = ["/installer", "/handoff", "/dist", "/docs", "/.github"]
+
+[dependencies]
+boa_engine = "0.22.0"
+bytes = "1.12.1"
+eframe = "0.37.0"
+prost = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
+prost-types = "0.14.4"
+protox = "0.10.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "native-tls", "form", "gzip", "http2", "charset", "multipart", "cookies"] }
+rfd = "0.17.2"
+serde_json = "1.0.154"
+serde_yaml = "0.9.34"
+tokio = { version = "1.53.3", features = ["rt", "net", "time", "sync"] }
+tokio-stream = "0.1"
+tonic = { version = "0.14.6", features = ["tls-ring", "tls-native-roots"] }
+tonic-reflection = { version = "0.14.6", default-features = false }
+tungstenite = { version = "0.30.0", features = ["native-tls"] }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[dev-dependencies]
+tokio = { version = "1.53.3", features = ["rt-multi-thread"] }
+tonic-reflection = { version = "0.14.6", features = ["server"] }

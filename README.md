@@ -131,6 +131,18 @@ expand it.
 - `require()` of npm modules in scripts (only `chai` is available)
 - Request history and code generation for languages other than cURL
 
+## Acknowledgements
+
+- **[REA](https://github.com/morluto/rea)** (`rea-agents`) — the reverse-engineering toolkit used to
+  analyze the shipped Bruno desktop app (its Electron `app.asar` inventory and runtime behaviour) so
+  ZenBruno could match Bruno's file formats, request pipeline and user interface.
+- **[Bruno](https://github.com/usebruno/bruno)** — the original open-source API client whose MIT-licensed
+  formats and behaviour ZenBruno reimplements.
+- **[egui / eframe](https://github.com/emilk/egui)**, **[boa](https://github.com/boa-dev/boa)**,
+  **[reqwest](https://github.com/seanmonstar/reqwest)**, **[tonic](https://github.com/hyperium/tonic)**,
+  **[protox](https://github.com/andrewhickman/protox)** and
+  **[tungstenite](https://github.com/snapview/tungstenite-rs)**, which do much of the heavy lifting.
+
 ## Contributing
 
 Issues and pull requests are welcome. Please run `cargo test --release` before submitting.

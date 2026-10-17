@@ -50,3 +50,6 @@ pub const ARROW_COUNTER_CLOCKWISE: &str = "\u{E038}";
 pub const INFO: &str = "\u{E2CE}";
 pub const LINK: &str = "\u{E2E2}";
 pub const CLOCK: &str = "\u{E19A}";
+pub const GEAR: &str = "\u{E270}";
+pub const MOON: &str = "\u{E330}";
+pub const SUN: &str = "\u{E472}";

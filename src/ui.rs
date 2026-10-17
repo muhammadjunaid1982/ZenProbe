@@ -1,19 +1,12 @@
-//! Bruno's look: light theme, orange brand, method colors, tab strips and key/value tables.
+//! Bruno's look: light and dark themes, orange brand, method colors, tab strips and key/value tables.
 
 use crate::model::Pair;
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Stroke, TextEdit, Ui, Vec2};
 
 pub const BRAND: Color32 = Color32::from_rgb(211, 127, 23);
-pub const TEXT: Color32 = Color32::from_rgb(52, 52, 52);
-pub const MUTED: Color32 = Color32::from_rgb(155, 155, 155);
-pub const SIDEBAR: Color32 = Color32::from_rgb(248, 248, 248);
-pub const BORDER: Color32 = Color32::from_rgb(229, 229, 229);
-pub const HOVER: Color32 = Color32::from_rgb(236, 236, 236);
 pub const GREEN: Color32 = Color32::from_rgb(46, 138, 84);
 pub const RED: Color32 = Color32::from_rgb(206, 79, 59);
 pub const PURPLE: Color32 = Color32::from_rgb(141, 67, 177);
-/// brand-tinted background for selected rows and items
-pub const SELECTED: Color32 = Color32::from_rgb(253, 239, 222);
 
 /// Phosphor icons right after the text font (so icons resolve before emoji), and a system
 /// font with Urdu/Arabic glyphs as the last fallback since egui's bundled fonts have none.
@@ -37,35 +30,99 @@ fn setup_fonts(ctx: &egui::Context) {
 
 pub fn setup(ctx: &egui::Context) {
     setup_fonts(ctx);
+    apply_theme(ctx);
+}
+
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn dark() -> bool {
+    DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Switch between the light and dark palettes and restyle egui.
+pub fn set_dark(ctx: &egui::Context, on: bool) {
+    DARK.store(on, std::sync::atomic::Ordering::Relaxed);
+    apply_theme(ctx);
+}
+
+const fn pick(light: Color32, dark: Color32, is_dark: bool) -> Color32 {
+    if is_dark { dark } else { light }
+}
+
+pub fn fg() -> Color32 {
+    pick(Color32::from_rgb(52, 52, 52), Color32::from_rgb(222, 222, 224), dark())
+}
+pub fn muted() -> Color32 {
+    pick(Color32::from_rgb(155, 155, 155), Color32::from_rgb(135, 135, 140), dark())
+}
+/// secondary text (headers in the timeline, section titles)
+pub fn subtle() -> Color32 {
+    pick(Color32::from_rgb(100, 100, 100), Color32::from_rgb(170, 170, 175), dark())
+}
+pub fn subtle_line() -> Color32 {
+    pick(Color32::from_rgb(200, 200, 200), Color32::from_rgb(80, 80, 86), dark())
+}
+pub fn panel() -> Color32 {
+    pick(Color32::WHITE, Color32::from_rgb(30, 30, 33), dark())
+}
+pub fn faint() -> Color32 {
+    pick(Color32::from_rgb(246, 246, 246), Color32::from_rgb(40, 40, 44), dark())
+}
+pub fn sidebar() -> Color32 {
+    pick(Color32::from_rgb(248, 248, 248), Color32::from_rgb(36, 36, 40), dark())
+}
+pub fn border() -> Color32 {
+    pick(Color32::from_rgb(229, 229, 229), Color32::from_rgb(56, 56, 62), dark())
+}
+pub fn hover() -> Color32 {
+    pick(Color32::from_rgb(238, 238, 238), Color32::from_rgb(50, 50, 55), dark())
+}
+/// brand-tinted background for selected rows and items
+pub fn selected() -> Color32 {
+    pick(Color32::from_rgb(253, 239, 222), Color32::from_rgb(72, 52, 28), dark())
+}
+pub fn warn_bg() -> Color32 {
+    pick(Color32::from_rgb(255, 247, 230), Color32::from_rgb(58, 46, 26), dark())
+}
+pub fn warn_fg() -> Color32 {
+    pick(Color32::from_rgb(150, 90, 10), Color32::from_rgb(235, 180, 100), dark())
+}
+
+fn apply_theme(ctx: &egui::Context) {
+    let is_dark = dark();
     ctx.set_theme(egui::Theme::Light);
     let mut style = (*ctx.global_style()).clone();
+    style.visuals = if is_dark { egui::Visuals::dark() } else { egui::Visuals::light() };
     let v = &mut style.visuals;
-    v.panel_fill = Color32::WHITE;
-    v.window_fill = Color32::WHITE;
-    v.extreme_bg_color = Color32::WHITE;
-    v.faint_bg_color = Color32::from_rgb(250, 250, 250);
-    v.override_text_color = Some(TEXT);
+    v.panel_fill = panel();
+    v.window_fill = panel();
+    v.extreme_bg_color = panel();
+    v.faint_bg_color = faint();
+    v.code_bg_color = faint();
+    v.override_text_color = Some(fg());
     v.hyperlink_color = BRAND;
     v.selection.stroke = Stroke::new(1.0, BRAND);
-    v.window_stroke = Stroke::new(1.0, BORDER);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    v.widgets.inactive.bg_fill = Color32::WHITE;
-    v.widgets.inactive.weak_bg_fill = Color32::WHITE;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    v.widgets.hovered.weak_bg_fill = HOVER;
-    v.widgets.hovered.bg_fill = HOVER;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(204, 204, 204));
-    v.widgets.active.weak_bg_fill = HOVER;
-    v.widgets.open.weak_bg_fill = HOVER;
+    v.selection.bg_fill = selected();
+    v.window_stroke = Stroke::new(1.0, border());
+    v.widgets.noninteractive.bg_fill = panel();
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border());
+    v.widgets.inactive.bg_fill = panel();
+    v.widgets.inactive.weak_bg_fill = panel();
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, border());
+    v.widgets.hovered.weak_bg_fill = hover();
+    v.widgets.hovered.bg_fill = hover();
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, subtle_line());
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, fg());
+    v.widgets.active.weak_bg_fill = hover();
+    v.widgets.open.weak_bg_fill = hover();
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = CornerRadius::same(6);
     }
     v.window_corner_radius = CornerRadius::same(10);
     v.menu_corner_radius = CornerRadius::same(8);
-    v.window_shadow = egui::epaint::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(28) };
-    v.popup_shadow = egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(22) };
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
-    v.selection.bg_fill = SELECTED;
+    let shadow = if is_dark { 90 } else { 28 };
+    v.window_shadow = egui::epaint::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(shadow) };
+    v.popup_shadow = egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(shadow - 6) };
     style.spacing.item_spacing = Vec2::new(8.0, 6.0);
     style.spacing.button_padding = Vec2::new(10.0, 5.0);
     style.spacing.interact_size.y = 26.0;
@@ -77,7 +134,6 @@ pub fn setup(ctx: &egui::Context) {
     }
     ctx.set_global_style(style);
 }
-
 pub fn method_color(m: &str) -> Color32 {
     match m.to_lowercase().as_str() {
         "get" => GREEN,
@@ -89,7 +145,7 @@ pub fn method_color(m: &str) -> Color32 {
         "grpc" => Color32::from_rgb(58, 124, 196),
         "ws" => Color32::from_rgb(198, 121, 16),
         "graphql" => Color32::from_rgb(200, 60, 140),
-        _ => MUTED,
+        _ => muted(),
     }
 }
 
@@ -120,10 +176,10 @@ pub fn tab_strip<T: PartialEq + Copy>(ui: &mut Ui, items: &[(T, &str, usize)], c
         for (value, label, count) in items {
             let active = *current == *value;
             let mut job = egui::text::LayoutJob::default();
-            let color = if active { TEXT } else { MUTED };
+            let color = if active { fg() } else { muted() };
             job.append(&tr(label), 0.0, egui::TextFormat { color, font_id: egui::FontId::proportional(13.0), ..Default::default() });
             if *count > 0 {
-                job.append(&count.to_string(), 2.0, egui::TextFormat { color: if active { BRAND } else { MUTED }, font_id: egui::FontId::proportional(9.5), valign: egui::Align::TOP, ..Default::default() });
+                job.append(&count.to_string(), 2.0, egui::TextFormat { color: if active { BRAND } else { muted() }, font_id: egui::FontId::proportional(9.5), valign: egui::Align::TOP, ..Default::default() });
             }
             let r = ui.add(egui::Label::new(job).sense(Sense::click()));
             if r.clicked() {
@@ -153,7 +209,7 @@ pub fn link_button(ui: &mut Ui, text: &str) -> egui::Response {
 }
 
 pub fn section_title(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(tr(text)).color(Color32::from_rgb(110, 110, 110)).size(12.0));
+    ui.label(RichText::new(tr(text)).color(subtle()).size(12.0));
 }
 
 #[derive(Clone, Copy, Default)]
@@ -175,8 +231,10 @@ pub fn kv_table(ui: &mut Ui, id: &str, rows: &mut Vec<Pair>, cfg: TableCfg) -> b
     let name_w = (full * 0.22).clamp(120.0, 260.0);
     let desc_w = if cfg.description { (full * 0.22).clamp(100.0, 260.0) } else { 0.0 };
     let extra_w = if cfg.multipart { 190.0 } else { 0.0 };
-    let value_w = (full - name_w - desc_w - extra_w - 90.0).max(140.0);
-    egui::Frame::new().stroke(Stroke::new(1.0, BORDER)).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+    let value_w = (full - name_w - desc_w - extra_w - 120.0).max(140.0);
+    egui::Frame::new().stroke(Stroke::new(1.0, border())).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+        // the frame spans the pane, so it lines up with the Bulk Edit link and other rows
+        ui.set_width(ui.available_width());
         egui::Grid::new(id).num_columns(6).spacing(Vec2::new(8.0, 4.0)).show(ui, |ui| {
             ui.label("");
             ui.label(RichText::new(tr("Name")).strong().size(12.0));
@@ -213,7 +271,7 @@ pub fn kv_table(ui: &mut Ui, id: &str, rows: &mut Vec<Pair>, cfg: TableCfg) -> b
                 if cfg.multipart && p.is_file {
                     ui.horizontal(|ui| {
                         let shown = if p.value.is_empty() { "No file selected".to_string() } else { p.value.replace('|', ", ") };
-                        ui.add_sized([value_w - 70.0, 20.0], egui::Label::new(RichText::new(shown).color(MUTED)).truncate());
+                        ui.add_sized([value_w - 70.0, 20.0], egui::Label::new(RichText::new(shown).color(muted())).truncate());
                         if ui.small_button("Browse…").clicked()
                             && let Some(files) = rfd::FileDialog::new().pick_files()
                         {
@@ -227,7 +285,7 @@ pub fn kv_table(ui: &mut Ui, id: &str, rows: &mut Vec<Pair>, cfg: TableCfg) -> b
                 if cfg.description {
                     changed |= ui.add_sized([desc_w, 20.0], TextEdit::singleline(&mut p.description).hint_text(tr("Description")).frame(egui::Frame::NONE)).changed();
                 }
-                if ui.add(egui::Button::new(RichText::new(crate::icons::TRASH).color(MUTED)).frame(false)).on_hover_text(tr("Delete")).clicked() {
+                if ui.add(egui::Button::new(RichText::new(crate::icons::TRASH).color(muted())).frame(false)).on_hover_text(tr("Delete")).clicked() {
                     remove = Some(i);
                 }
                 ui.end_row();
@@ -286,11 +344,15 @@ pub fn parse_bulk(text: &str, old: &[Pair]) -> Vec<Pair> {
         .collect()
 }
 
-/// Key/value table with a "Bulk Edit" text mode toggle (state kept per table id).
-pub fn kv_editor(ui: &mut Ui, id: &str, rows: &mut Vec<Pair>, cfg: TableCfg) -> bool {
+/// Key/value table with an optional section title and a "Bulk Edit" text-mode toggle on the
+/// same row (state kept per table id).
+pub fn kv_editor(ui: &mut Ui, id: &str, title: &str, rows: &mut Vec<Pair>, cfg: TableCfg) -> bool {
     let mode_id = ui.scope_id().with((id, "bulk"));
     let mut bulk: bool = ui.data(|d| d.get_temp(mode_id).unwrap_or(false));
     ui.horizontal(|ui| {
+        if !title.is_empty() {
+            section_title(ui, title);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if link_button(ui, if bulk { "Key/Value Edit" } else { "Bulk Edit" }).clicked() {
                 bulk = !bulk;
@@ -309,7 +371,7 @@ pub fn kv_editor(ui: &mut Ui, id: &str, rows: &mut Vec<Pair>, cfg: TableCfg) -> 
         *rows = parse_bulk(&text, rows);
     }
     ui.data_mut(|d| d.insert_temp(text_id, text));
-    ui.label(RichText::new(tr("One `name: value` per line; prefix a line with // to disable it.")).color(MUTED).size(11.5));
+    ui.label(RichText::new(tr("One `name: value` per line; prefix a line with // to disable it.")).color(muted()).size(11.5));
     changed
 }
 
@@ -317,8 +379,8 @@ pub fn kv_editor(ui: &mut Ui, id: &str, rows: &mut Vec<Pair>, cfg: TableCfg) -> 
 pub fn menu_item(ui: &mut Ui, icon: &str, label: &str) -> egui::Response {
     let mut job = egui::text::LayoutJob::default();
     let font = egui::TextStyle::Button.resolve(ui.style());
-    job.append(icon, 0.0, egui::TextFormat { font_id: egui::FontId::proportional(font.size + 1.5), color: MUTED, valign: egui::Align::Center, ..Default::default() });
-    job.append(&tr(label), 8.0, egui::TextFormat { font_id: font, color: TEXT, valign: egui::Align::Center, ..Default::default() });
+    job.append(icon, 0.0, egui::TextFormat { font_id: egui::FontId::proportional(font.size + 1.5), color: muted(), valign: egui::Align::Center, ..Default::default() });
+    job.append(&tr(label), 8.0, egui::TextFormat { font_id: font, color: fg(), valign: egui::Align::Center, ..Default::default() });
     ui.add(egui::Button::new(job).frame_when_inactive(false).min_size(Vec2::new(170.0, 0.0)))
 }
 
@@ -326,7 +388,7 @@ pub fn menu_item(ui: &mut Ui, icon: &str, label: &str) -> egui::Response {
 pub fn icon_button(ui: &mut Ui, icon: &str, tip: &str) -> egui::Response {
     let id = ui.next_auto_id();
     let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
-    ui.add(egui::Button::new(RichText::new(icon).size(15.0).color(if hovered { BRAND } else { MUTED })).frame(false)).on_hover_text(tip)
+    ui.add(egui::Button::new(RichText::new(icon).size(15.0).color(if hovered { BRAND } else { muted() })).frame(false)).on_hover_text(tip)
 }
 
 /// Minimal Markdown preview for docs: headings, lists, quotes, rules, fenced code, **bold**, `code`.
@@ -336,7 +398,7 @@ pub fn markdown(ui: &mut Ui, text: &str) {
     for line in text.lines() {
         if line.trim_start().starts_with("```") {
             if in_code {
-                egui::Frame::new().fill(Color32::from_rgb(246, 246, 246)).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+                egui::Frame::new().fill(faint()).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(RichText::new(rtl(code.trim_end())).monospace());
                 });
@@ -361,20 +423,20 @@ pub fn markdown(ui: &mut Ui, text: &str) {
             ui.separator();
         } else if t.chars().any(crate::rtl::is_rtl) && (t.starts_with("- ") || t.starts_with("* ") || t.starts_with("> ")) {
             // the bullet / quote bar leads an RTL line, so it is drawn on the right
-            let color = if t.starts_with('>') { MUTED } else { TEXT };
+            let color = if t.starts_with('>') { muted() } else { fg() };
             inline_md(ui, &format!("{} {}", if t.starts_with('>') { "▍" } else { "•" }, &t[2..]), color);
         } else if let Some(r) = t.strip_prefix("> ") {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("▍").color(BORDER));
-                inline_md(ui, r, MUTED);
+                ui.label(RichText::new("▍").color(border()));
+                inline_md(ui, r, muted());
             });
         } else if let Some(r) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
             ui.horizontal_wrapped(|ui| {
                 ui.label("•");
-                inline_md(ui, r, TEXT);
+                inline_md(ui, r, fg());
             });
         } else {
-            ui.horizontal_wrapped(|ui| inline_md(ui, t, TEXT));
+            ui.horizontal_wrapped(|ui| inline_md(ui, t, fg()));
         }
     }
     if in_code && !code.is_empty() {
@@ -393,7 +455,7 @@ fn inline_md(ui: &mut Ui, text: &str, color: Color32) {
     let mut bold = false;
     for (i, seg) in text.split('`').enumerate() {
         if i % 2 == 1 {
-            ui.label(RichText::new(seg).monospace().background_color(Color32::from_rgb(242, 242, 242)));
+            ui.label(RichText::new(seg).monospace().background_color(faint()));
             continue;
         }
         for (j, part) in seg.split("**").enumerate() {
@@ -410,7 +472,7 @@ fn inline_md(ui: &mut Ui, text: &str, color: Color32) {
 
 pub fn code_editor(ui: &mut Ui, text: &mut String, rows: usize) -> bool {
     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, w: f32| rtl_layout(ui, buf.as_str(), w, egui::TextStyle::Monospace);
-    egui::Frame::new().stroke(Stroke::new(1.0, BORDER)).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
+    egui::Frame::new().stroke(Stroke::new(1.0, border())).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
         ui.add(TextEdit::multiline(text).code_editor().desired_rows(rows).desired_width(f32::INFINITY).frame(egui::Frame::NONE).layouter(&mut layouter)).changed()
     })
     .inner
@@ -427,7 +489,7 @@ pub fn code_view(ui: &mut Ui, text: &str) {
 pub fn rtl_layout(ui: &Ui, text: &str, wrap_width: f32, style: egui::TextStyle) -> std::sync::Arc<egui::Galley> {
     let font = style.resolve(ui.style());
     let shown = crate::rtl::visual(text);
-    let mut job = egui::text::LayoutJob::simple(shown.into_owned(), font, ui.visuals().override_text_color.unwrap_or(TEXT), wrap_width);
+    let mut job = egui::text::LayoutJob::simple(shown.into_owned(), font, ui.visuals().override_text_color.unwrap_or(fg()), wrap_width);
     job.wrap.max_width = wrap_width;
     ui.fonts_mut(|f| f.layout_job(job))
 }
@@ -455,11 +517,11 @@ pub fn highlight_vars(ui: &Ui, text: &str, wrap_width: f32) -> std::sync::Arc<eg
     let mut rest = shaped.as_ref();
     while let Some(start) = rest.find("{{") {
         let end = rest[start..].find("}}").map(|e| start + e + 2).unwrap_or(rest.len());
-        job.append(&rest[..start], 0.0, fmt(TEXT));
+        job.append(&rest[..start], 0.0, fmt(fg()));
         job.append(&rest[start..end], 0.0, fmt(GREEN));
         rest = &rest[end..];
     }
-    job.append(rest, 0.0, fmt(TEXT));
+    job.append(rest, 0.0, fmt(fg()));
     job.wrap.max_width = wrap_width;
     ui.fonts_mut(|f| f.layout_job(job))
 }

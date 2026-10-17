@@ -75,8 +75,10 @@ native executable.
 **Workspace**
 - Quick search (`Ctrl+K`) across every open collection
 - Tab context menu: revert changes, clone, close others / left / right / all saved; reopen closed tab
-- Zoom, response layout and language in Preferences (`Ctrl+,`), with the full shortcut list
-- Clean, modern light theme with [Phosphor](https://phosphoricons.com) icons
+- **Preferences** (`Ctrl+,`, or the button at the bottom of the sidebar): language, theme, zoom and
+  response layout, plus the full shortcut list; the sidebar footer also has one-click theme and
+  language toggles
+- Light and dark themes with [Phosphor](https://phosphoricons.com) icons
 
 **اردو (Urdu)**
 - Urdu interface: *Preferences → Language → اردو*

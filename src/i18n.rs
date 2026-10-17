@@ -174,6 +174,11 @@ fn urdu_text(text: &str) -> Option<&'static str> {
         // preferences, search, status bar
         "Preferences" => "ترجیحات",
         "Language" => "زبان",
+        "Theme" => "تھیم",
+        "Light" => "روشن",
+        "Dark" => "تاریک",
+        "Light theme" => "روشن تھیم",
+        "Dark theme" => "تاریک تھیم",
         "Zoom" => "زوم",
         "Response layout" => "جواب کی ترتیب",
         "Side by side" => "ساتھ ساتھ",

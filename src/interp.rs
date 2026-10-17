@@ -2,31 +2,10 @@
 //! `res.*` expressions used by `vars:post-response` and `assert` blocks.
 
 use serde_json::Value;
+use crate::faker::mock;
 use std::collections::HashMap;
-use std::hash::{BuildHasher, RandomState};
 
 pub type Vars = HashMap<String, String>;
-
-fn random_u64() -> u64 {
-    RandomState::new().hash_one(std::time::SystemTime::now())
-}
-
-/// Subset of Bruno's `{{$mock}}` functions.
-fn mock(name: &str) -> Option<String> {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?;
-    Some(match name {
-        "timestamp" => now.as_secs().to_string(),
-        "randomInt" => (random_u64() % 1000).to_string(),
-        "guid" | "randomUUID" => {
-            let (a, b) = (random_u64(), random_u64());
-            format!(
-                "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-                a >> 32, (a >> 16) & 0xffff, a & 0xfff, (b >> 48) & 0x3fff | 0x8000, b & 0xffff_ffff_ffff
-            )
-        }
-        _ => return None,
-    })
-}
 
 fn escape_json(s: &str) -> String {
     let quoted = Value::String(s.to_string()).to_string();
@@ -119,6 +98,64 @@ fn walk<'v>(mut v: &'v Value, path: &str) -> Option<&'v Value> {
     Some(v)
 }
 
+/// JSONPath subset used by the response filter: `$`, `.key`, `['key']`, `[0]`, `[-1]`,
+/// `[*]`, `.*`, `..key` and `[a,b]`. Returns every match as an array (like jsonpath-plus).
+pub fn json_path(root: &Value, path: &str) -> Result<Value, String> {
+    let path = path.trim();
+    let mut p = path.strip_prefix('$').unwrap_or(path);
+    let mut cur: Vec<&Value> = vec![root];
+    fn children(v: &Value) -> Vec<&Value> {
+        match v {
+            Value::Array(a) => a.iter().collect(),
+            Value::Object(o) => o.values().collect(),
+            _ => vec![],
+        }
+    }
+    fn descend<'v>(v: &'v Value, out: &mut Vec<&'v Value>) {
+        out.push(v);
+        for c in children(v) {
+            descend(c, out);
+        }
+    }
+    fn select<'v>(v: &'v Value, key: &str) -> Vec<&'v Value> {
+        if key == "*" {
+            return children(v);
+        }
+        if let (Value::Array(a), Ok(i)) = (v, key.parse::<i64>()) {
+            let i = if i < 0 { a.len() as i64 + i } else { i };
+            return usize::try_from(i).ok().and_then(|i| a.get(i)).into_iter().collect();
+        }
+        v.get(key).into_iter().collect()
+    }
+    while !p.is_empty() {
+        let recursive = p.starts_with("..");
+        if recursive {
+            let mut all = vec![];
+            for v in &cur {
+                descend(v, &mut all);
+            }
+            cur = all;
+            p = &p[1..];
+        }
+        let keys: Vec<String> = if let Some(r) = p.strip_prefix('.') {
+            let end = r.find(['.', '[']).unwrap_or(r.len());
+            if end == 0 && !recursive {
+                return Err(format!("unexpected '.' in {path}"));
+            }
+            p = &r[end..];
+            if end == 0 { continue } else { vec![r[..end].to_string()] }
+        } else if let Some(r) = p.strip_prefix('[') {
+            let end = r.find(']').ok_or_else(|| format!("missing ']' in {path}"))?;
+            p = &r[end + 1..];
+            r[..end].split(',').map(|k| k.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).collect()
+        } else {
+            return Err(format!("cannot parse JSONPath near `{p}`"));
+        };
+        cur = cur.iter().flat_map(|v| keys.iter().flat_map(move |k| select(v, k))).collect();
+    }
+    Ok(Value::Array(cur.into_iter().cloned().collect()))
+}
+
 /// RHS literal: JSON (number, bool, null, "string", array) or bare string.
 fn literal(s: &str) -> Value {
     serde_json::from_str(s.trim()).unwrap_or_else(|_| Value::String(s.trim().to_string()))
@@ -193,6 +230,18 @@ pub fn assert(lhs_expr: &str, op_and_rhs: &str, res: &ResCtx) -> Result<(), Stri
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn json_path_filter() {
+        let v = json!({"store": {"books": [{"author": "A", "price": 5}, {"author": "B", "price": 9}], "owner": {"author": "C"}}});
+        assert_eq!(json_path(&v, "$.store.books[0].author").unwrap(), json!(["A"]));
+        assert_eq!(json_path(&v, "$.store.books[*].price").unwrap(), json!([5, 9]));
+        assert_eq!(json_path(&v, "$.store.books[-1].author").unwrap(), json!(["B"]));
+        assert_eq!(json_path(&v, "$..author").unwrap(), json!(["A", "B", "C"]));
+        assert_eq!(json_path(&v, "$.store['owner']").unwrap(), json!([{"author": "C"}]));
+        assert_eq!(json_path(&v, "$.missing").unwrap(), json!([]));
+        assert!(json_path(&v, "$.store[0").is_err());
+    }
 
     #[test]
     fn interpolates_recursively() {

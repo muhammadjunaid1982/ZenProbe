@@ -37,6 +37,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## Phosphor Icons
+
+`assets/fonts/Phosphor.ttf` is the regular-weight Phosphor icon font
+(https://github.com/phosphor-icons/core), MIT License, Copyright (c) 2023 Phosphor Icons.
+The MIT license text above applies with that copyright notice.
+
 ## Rust crates
 
 ZenProbe links many open-source crates (egui/eframe, boa, reqwest, tonic, prost,

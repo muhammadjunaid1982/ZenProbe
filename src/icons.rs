@@ -1,0 +1,52 @@
+//! Phosphor icon codepoints (regular weight, MIT, https://phosphoricons.com) used by the UI.
+//! The font is bundled at assets/fonts/Phosphor.ttf.
+#![allow(dead_code)]
+
+pub const PACKAGE: &str = "\u{E390}";
+pub const FOLDER_OPEN: &str = "\u{E256}";
+pub const FOLDER_SIMPLE: &str = "\u{E25A}";
+pub const GEAR_SIX: &str = "\u{E272}";
+pub const PERSON_SIMPLE_RUN: &str = "\u{E730}";
+pub const LIGHTNING: &str = "\u{E2DE}";
+pub const FLOPPY_DISK: &str = "\u{E248}";
+pub const TRASH: &str = "\u{E4A6}";
+pub const COPY: &str = "\u{E1CA}";
+pub const MAGNIFYING_GLASS: &str = "\u{E30C}";
+pub const PLUS: &str = "\u{E3D4}";
+pub const DOTS_THREE: &str = "\u{E1FE}";
+pub const CODE: &str = "\u{E1BC}";
+pub const PAPER_PLANE_TILT: &str = "\u{E398}";
+pub const CARET_RIGHT: &str = "\u{E13A}";
+pub const CARET_DOWN: &str = "\u{E136}";
+pub const X: &str = "\u{E4F6}";
+pub const CHECK_CIRCLE: &str = "\u{E184}";
+pub const X_CIRCLE: &str = "\u{E4F8}";
+pub const WARNING: &str = "\u{E4E0}";
+pub const GLOBE: &str = "\u{E288}";
+pub const DOWNLOAD_SIMPLE: &str = "\u{E20C}";
+pub const ARROW_CLOCKWISE: &str = "\u{E036}";
+pub const SQUARE_SPLIT_HORIZONTAL: &str = "\u{E870}";
+pub const SQUARE_SPLIT_VERTICAL: &str = "\u{E874}";
+pub const PLAY: &str = "\u{E3D0}";
+pub const STOP: &str = "\u{E46C}";
+pub const CIRCLE: &str = "\u{E18A}";
+pub const TRANSLATE: &str = "\u{E4A2}";
+pub const FILE_CODE: &str = "\u{E914}";
+pub const BROOM: &str = "\u{EC54}";
+pub const CHECK: &str = "\u{E182}";
+pub const PENCIL_SIMPLE: &str = "\u{E3B4}";
+pub const EYE: &str = "\u{E220}";
+pub const STACK: &str = "\u{E466}";
+pub const FOLDER_PLUS: &str = "\u{E258}";
+pub const FILE_PLUS: &str = "\u{E236}";
+pub const CHART_LINE: &str = "\u{E154}";
+pub const ARROW_UP: &str = "\u{E08E}";
+pub const ARROW_DOWN: &str = "\u{E03E}";
+pub const PLUGS_CONNECTED: &str = "\u{EB5A}";
+pub const LIST_BULLETS: &str = "\u{E2F2}";
+pub const FILE_TEXT: &str = "\u{E23A}";
+pub const SKIP_FORWARD: &str = "\u{E5A6}";
+pub const ARROW_COUNTER_CLOCKWISE: &str = "\u{E038}";
+pub const INFO: &str = "\u{E2CE}";
+pub const LINK: &str = "\u{E2E2}";
+pub const CLOCK: &str = "\u{E19A}";

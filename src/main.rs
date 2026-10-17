@@ -2,14 +2,19 @@
 
 mod app;
 mod bru;
+mod codegen;
 mod collection;
 mod curl;
 mod exec;
+mod faker;
 mod grpc;
 mod http;
+mod i18n;
+mod icons;
 mod interp;
 mod loadtest;
 mod model;
+mod rtl;
 mod script;
 mod ui;
 mod ws;

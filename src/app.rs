@@ -1,6 +1,7 @@
 use crate::collection::{self, Collection, Node};
 use crate::exec::{self, Job, Outcome, Runtime};
 use crate::grpc;
+use crate::icons;
 use crate::interp::Vars;
 use crate::loadtest;
 use crate::model::{Environment, FolderSettings, Format, Message, Pair, Request};
@@ -15,6 +16,21 @@ use std::sync::Arc;
 use std::time::Instant;
 
 const MAX_SHOWN_BODY: usize = 2 * 1024 * 1024;
+
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Send request", "Ctrl + Enter"),
+    ("Save", "Ctrl + S"),
+    ("New request", "Ctrl + N"),
+    ("Search requests", "Ctrl + K"),
+    ("Edit environments", "Ctrl + E"),
+    ("Close tab", "Ctrl + W"),
+    ("Close all saved tabs", "Ctrl + Shift + W"),
+    ("Reopen closed tab", "Ctrl + Shift + T"),
+    ("Next / previous tab", "Ctrl + Tab / Ctrl + Shift + Tab"),
+    ("Go to tab 1–8 / last tab", "Ctrl + 1…8 / Ctrl + 9"),
+    ("Zoom in / out / reset", "Ctrl + = / Ctrl + - / Ctrl + 0"),
+    ("Preferences", "Ctrl + ,"),
+];
 
 #[derive(PartialEq, Clone, Copy)]
 enum ReqSub {
@@ -82,6 +98,19 @@ struct ReqTab {
     sent_at: Option<Instant>,
     grpc: GrpcState,
     ws: WsState,
+    view: ResView,
+    /// JSONPath response filter and its cached (filter, result) pair
+    filter: String,
+    filtered: (String, String),
+    docs_edit: bool,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum ResView {
+    Pretty,
+    Raw,
+    Hex,
+    Base64,
 }
 
 struct SettingsTab {
@@ -115,6 +144,8 @@ struct RunnerTab {
     rx: Option<Receiver<RunMsg>>,
     stop: Arc<AtomicBool>,
     picked: Option<usize>,
+    /// results filter (None = all)
+    show: Option<RowState>,
 }
 
 enum TabKind {
@@ -179,6 +210,14 @@ enum Dialog {
     Quit,
 }
 
+enum TabAction {
+    Close(usize),
+    /// close clean tabs with index in from..to, except `keep`
+    CloseWhere(usize, usize, Option<usize>),
+    Revert(usize),
+    Clone(usize),
+}
+
 enum Act {
     OpenRequest(PathBuf, PathBuf),
     OpenSettings(PathBuf, PathBuf),
@@ -207,8 +246,29 @@ pub struct ZenApp {
     filter: String,
     acts: Vec<Act>,
     quitting: bool,
-    /// Generated code window: (title, code)
-    code_window: Option<(String, String)>,
+    /// Generated code window: (title, prepared request)
+    code_window: Option<(String, crate::http::Prepared)>,
+    prefs: Prefs,
+    prefs_open: bool,
+    /// Ctrl+K quick search: (query, selected row)
+    search: Option<(String, usize)>,
+    /// recently closed request files, for Ctrl+Shift+T
+    closed: Vec<(PathBuf, PathBuf)>,
+}
+
+/// User preferences, persisted in state.json.
+#[derive(Clone, PartialEq)]
+struct Prefs {
+    zoom: f32,
+    /// response below the request instead of beside it
+    stacked: bool,
+    code_lang: usize,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs { zoom: 1.0, stacked: false, code_lang: 0 }
+    }
 }
 
 fn state_file() -> PathBuf {
@@ -274,9 +334,18 @@ impl ZenApp {
             acts: vec![],
             quitting: false,
             code_window: None,
+            prefs: Prefs::default(),
+            prefs_open: false,
+            search: None,
+            closed: vec![],
         };
         if let Ok(text) = std::fs::read_to_string(state_file()) {
             let state: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+            let p = &state["prefs"];
+            app.prefs.zoom = p["zoom"].as_f64().map(|z| (z as f32).clamp(0.5, 2.0)).unwrap_or(1.0);
+            app.prefs.stacked = p["stacked"].as_bool().unwrap_or(false);
+            app.prefs.code_lang = p["codeLang"].as_u64().unwrap_or(0) as usize;
+            crate::i18n::set_urdu(p["lang"] == "ur");
             for p in state["collections"].as_array().into_iter().flatten().filter_map(|p| p.as_str()) {
                 if let Ok(c) = Collection::open(Path::new(p)) {
                     app.collections.push(c);
@@ -322,7 +391,8 @@ impl ZenApp {
         if let Some(dir) = file.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(file, serde_json::json!({ "collections": paths }).to_string());
+        let prefs = serde_json::json!({ "zoom": self.prefs.zoom, "stacked": self.prefs.stacked, "codeLang": self.prefs.code_lang, "lang": if crate::i18n::urdu() { "ur" } else { "en" } });
+        let _ = std::fs::write(file, serde_json::json!({ "collections": paths, "prefs": prefs }).to_string());
     }
 
     fn col(&self, root: &Path) -> Option<&Collection> {
@@ -380,7 +450,7 @@ impl ZenApp {
                 _ if req.body_mode != "none" => ReqSub::Body,
                 _ => ReqSub::Params,
             };
-            Ok(TabKind::Request(Box::new(ReqTab { path: path.to_path_buf(), req, saved, sub, res_sub: ResSub::Response, outcome: None, pretty: String::new(), pending: None, sent_at: None, grpc: GrpcState::default(), ws: WsState::default() })))
+            Ok(TabKind::Request(Box::new(ReqTab { path: path.to_path_buf(), req, saved, sub, res_sub: ResSub::Response, outcome: None, pretty: String::new(), pending: None, sent_at: None, grpc: GrpcState::default(), ws: WsState::default(), view: ResView::Pretty, filter: String::new(), filtered: Default::default(), docs_edit: false })))
         });
         self.current_root = Some(root.to_path_buf());
     }
@@ -407,7 +477,7 @@ impl ZenApp {
             self.active = i;
             return;
         }
-        let tab = RunnerTab { dir: dir.to_path_buf(), delay: String::new(), iterations: "1".into(), include_tags: String::new(), exclude_tags: String::new(), items, results: vec![], rx: None, stop: Arc::new(AtomicBool::new(false)), picked: None };
+        let tab = RunnerTab { dir: dir.to_path_buf(), delay: String::new(), iterations: "1".into(), include_tags: String::new(), exclude_tags: String::new(), items, results: vec![], rx: None, stop: Arc::new(AtomicBool::new(false)), picked: None, show: None };
         self.tabs.push(Tab { root: root.to_path_buf(), kind: TabKind::Runner(Box::new(tab)) });
         self.active = self.tabs.len() - 1;
         self.current_root = Some(root.to_path_buf());
@@ -531,6 +601,9 @@ impl ZenApp {
             {
                 let _ = tx.send(ws::Command::Close);
             }
+            if let TabKind::Request(t) = &self.tabs[i].kind {
+                self.closed.push((self.tabs[i].root.clone(), t.path.clone()));
+            }
             self.tabs.remove(i);
             if self.active >= self.tabs.len() {
                 self.active = self.tabs.len().saturating_sub(1);
@@ -606,6 +679,7 @@ impl ZenApp {
                     {
                         t.pending = None;
                         t.pretty = o.response.as_ref().map(|r| pretty_body(&r.body)).unwrap_or_default();
+                        t.filtered.0 = "\0stale".into();
                         if !o.tests.is_empty() && o.tests.iter().any(|x| !x.passed) || o.asserts.iter().any(|a| a.1.is_err()) {
                             t.res_sub = ResSub::Tests;
                         } else if t.res_sub == ResSub::Tests && o.tests.is_empty() && o.asserts.is_empty() {
@@ -723,27 +797,27 @@ impl ZenApp {
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("📦 Collections").strong());
+            ui.label(RichText::new(format!("{} {}", icons::PACKAGE, ui::tr("Collections"))).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button(RichText::new("⋯").strong(), |ui| {
-                    if ui.button("Create collection").clicked() {
+                ui.menu_button(RichText::new(icons::DOTS_THREE).strong(), |ui| {
+                    if ui::menu_item(ui, icons::PLUS, "Create collection").clicked() {
                         self.dialog = Some(Dialog::NewCollection { name: String::new(), format: Format::Yaml });
                         ui.close();
                     }
-                    if ui.button("Open collection").clicked() {
+                    if ui::menu_item(ui, icons::FOLDER_OPEN, "Open collection").clicked() {
                         ui.close();
                         self.open_collection_dialog();
                     }
                 });
-                if ui.add(egui::Button::new(RichText::new("+").size(16.0)).frame(false)).on_hover_text("Create collection").clicked() {
+                if ui.add(egui::Button::new(RichText::new(icons::PLUS).size(15.0)).frame(false)).on_hover_text(ui::tr("Create collection")).clicked() {
                     self.dialog = Some(Dialog::NewCollection { name: String::new(), format: Format::Yaml });
                 }
-                if ui.add(egui::Button::new("📂").frame(false)).on_hover_text("Open collection").clicked() {
+                if ui::icon_button(ui, icons::FOLDER_OPEN, &ui::tr("Open collection")).clicked() {
                     self.open_collection_dialog();
                 }
             });
         });
-        ui.add(TextEdit::singleline(&mut self.filter).hint_text("🔍 Search requests").desired_width(f32::INFINITY));
+        ui.add(TextEdit::singleline(&mut self.filter).hint_text(format!("{} {}", icons::MAGNIFYING_GLASS, ui::tr("Search requests"))).desired_width(f32::INFINITY));
         ui.add_space(4.0);
         let current = self.tabs.get(self.active).and_then(|t| t.path().map(Path::to_path_buf));
         let filter = self.filter.to_lowercase();
@@ -752,7 +826,7 @@ impl ZenApp {
             if self.collections.is_empty() {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("No collections open").color(MUTED));
+                    ui.label(RichText::new(ui::tr("No collections open")).color(MUTED));
                     if ui::link_button(ui, "Open collection").clicked() {
                         acts.push(Act::Activate(PathBuf::new()));
                     }
@@ -763,7 +837,7 @@ impl ZenApp {
             }
             for c in &self.collections {
                 let open = self.expanded.contains(&c.root);
-                let r = tree_row(ui, 0, Some(open), RichText::new(&c.name).strong(), None, self.current_root.as_ref() == Some(&c.root) && current.as_deref() == Some(c.root.as_path()));
+                let r = tree_row(ui, 0, Some(open), RichText::new(ui::rtl(&c.name)).strong(), None, self.current_root.as_ref() == Some(&c.root) && current.as_deref() == Some(c.root.as_path()));
                 if chevron_clicked(&r, 0) {
                     acts.push(Act::Activate(c.root.clone()));
                 } else if r.clicked() {
@@ -773,11 +847,11 @@ impl ZenApp {
                 r.context_menu(|ui| {
                     folder_menu(ui, &c.root, &c.root, true, &mut acts);
                     ui.separator();
-                    if ui.button("Reload from disk").clicked() {
+                    if ui::menu_item(ui, icons::ARROW_CLOCKWISE, "Reload from disk").clicked() {
                         acts.push(Act::Reload(c.root.clone()));
                         ui.close();
                     }
-                    if ui.button("Close collection").clicked() {
+                    if ui::menu_item(ui, icons::X, "Close collection").clicked() {
                         acts.push(Act::CloseCollection(c.root.clone()));
                         ui.close();
                     }
@@ -798,8 +872,8 @@ impl ZenApp {
         let name = c.name.clone();
         let envs: Vec<String> = c.envs.iter().map(|e| e.name.clone()).collect();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("📦").size(15.0));
-            if ui.add(egui::Label::new(RichText::new(&name).strong().size(14.0)).sense(egui::Sense::click())).on_hover_text("Collection settings").clicked() {
+            ui.label(RichText::new(icons::PACKAGE).size(15.0));
+            if ui.add(egui::Label::new(RichText::new(&name).strong().size(14.0)).sense(egui::Sense::click())).on_hover_text(ui::tr("Collection settings")).clicked() {
                 self.acts.push(Act::OpenSettings(root.clone(), root.clone()));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -815,14 +889,14 @@ impl ZenApp {
                         }
                     }
                     ui.separator();
-                    if ui.button("⚙ Configure").clicked() {
+                    if ui.button(format!("{} {}", icons::GEAR_SIX, ui::tr("Configure"))).clicked() {
                         self.env_window = Some((root.clone(), sel.unwrap_or(0)));
                     }
                 });
-                if ui.add(egui::Button::new("🏃").frame(false)).on_hover_text("Runner").clicked() {
+                if ui::icon_button(ui, icons::PERSON_SIMPLE_RUN, &ui::tr("Runner")).clicked() {
                     self.acts.push(Act::OpenRunner(root.clone(), root.clone()));
                 }
-                if ui.add(egui::Button::new("⚙").frame(false)).on_hover_text("Collection settings").clicked() {
+                if ui::icon_button(ui, icons::GEAR_SIX, &ui::tr("Collection settings")).clicked() {
                     self.acts.push(Act::OpenSettings(root.clone(), root.clone()));
                 }
             });
@@ -831,6 +905,7 @@ impl ZenApp {
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
+        let mut tab_action = None;
         let mut new_req = false;
         egui::ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -847,43 +922,108 @@ impl ZenApp {
                                 match &tab.kind {
                                     TabKind::Request(t) => {
                                         ui.label(ui::method_tag(&t.req.method, &t.req.kind));
-                                        ui.label(truncate(&t.req.name, 26));
+                                        ui.label(ui::rtl(&truncate(&t.req.name, 26)));
                                     }
                                     TabKind::Settings(t) => {
-                                        ui.label(RichText::new("⚙").color(BRAND));
-                                        ui.label(if t.is_collection { "Collection".to_string() } else { truncate(&t.data.name, 24) });
+                                        ui.label(RichText::new(icons::GEAR_SIX).color(BRAND));
+                                        ui.label(if t.is_collection { ui::tr("Collection") } else { ui::rtl(&truncate(&t.data.name, 24)) });
                                     }
                                     TabKind::Runner(_) => {
-                                        ui.label(RichText::new("🏃").color(BRAND));
-                                        ui.label("Runner");
+                                        ui.label(RichText::new(icons::PERSON_SIMPLE_RUN).color(BRAND));
+                                        ui.label(ui::tr("Runner"));
                                     }
                                     TabKind::Load(l) => {
-                                        ui.label(RichText::new("⚡").color(BRAND));
+                                        ui.label(RichText::new(icons::LIGHTNING).color(BRAND));
                                         ui.label(format!("Load · {}", truncate(&l.name, 20)));
                                     }
                                 }
-                                let x = if dirty { RichText::new("●").color(BRAND).size(10.0) } else { RichText::new("×").color(MUTED) };
-                                if ui.add(egui::Button::new(x).frame(false).small()).on_hover_text("Close (Ctrl+W)").clicked() {
+                                let x = if dirty { RichText::new(ui::tr("●")).color(BRAND).size(10.0) } else { RichText::new(icons::X).color(MUTED).size(11.0) };
+                                if ui.add(egui::Button::new(x).frame(false).small()).on_hover_text(ui::tr("Close (Ctrl+W)")).clicked() {
                                     close = Some(i);
                                 }
                             });
                         })
                         .response
                         .interact(egui::Sense::click());
+                    if active {
+                        // brand accent along the active tab's top edge
+                        let top = egui::Rect::from_min_size(r.rect.min + egui::vec2(4.0, 0.0), egui::vec2(r.rect.width() - 8.0, 2.0));
+                        ui.painter().rect_filled(top, 1.0, BRAND);
+                    } else if r.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
                     if r.clicked() {
                         self.active = i;
                     }
                     if r.middle_clicked() {
                         close = Some(i);
                     }
+                    r.context_menu(|ui| {
+                        let is_request = matches!(tab.kind, TabKind::Request(_));
+                        let n = self.tabs.len();
+                        let items = [
+                            ("Revert changes", TabAction::Revert(i), dirty),
+                            ("Clone request", TabAction::Clone(i), is_request),
+                            ("Close", TabAction::Close(i), true),
+                            ("Close others", TabAction::CloseWhere(0, n, Some(i)), n > 1),
+                            ("Close to the left", TabAction::CloseWhere(0, i, None), i > 0),
+                            ("Close to the right", TabAction::CloseWhere(i + 1, n, None), i + 1 < n),
+                            ("Close all saved", TabAction::CloseWhere(0, n, None), true),
+                        ];
+                        for (k, (label, action, enabled)) in items.into_iter().enumerate() {
+                            if k == 2 {
+                                ui.separator();
+                            }
+                            if ui.add_enabled(enabled, egui::Button::new(ui::tr(label))).clicked() {
+                                tab_action = Some(action);
+                                ui.close();
+                            }
+                        }
+                    });
                 }
-                if self.current_root.is_some() && ui.add(egui::Button::new(RichText::new("+").size(16.0).color(MUTED)).frame(false)).on_hover_text("New request").clicked() {
+                if self.current_root.is_some() && ui.add(egui::Button::new(RichText::new(icons::PLUS).size(15.0).color(MUTED)).frame(false)).on_hover_text(ui::tr("New request")).clicked() {
                     new_req = true;
                 }
             });
         });
         if let Some(i) = close {
             self.request_close_tab(i);
+        }
+        match tab_action {
+            Some(TabAction::Close(i)) => self.request_close_tab(i),
+            Some(TabAction::CloseWhere(from, to, keep)) => {
+                // unsaved tabs are never closed in bulk
+                let before = self.tabs.len();
+                let active_path = self.tabs.get(self.active).and_then(|t| t.path().map(Path::to_path_buf));
+                let mut j = 0;
+                self.tabs.retain(|t| {
+                    let close = j >= from && j < to && Some(j) != keep && !t.dirty();
+                    j += 1;
+                    !close
+                });
+                self.active = active_path.and_then(|p| self.tabs.iter().position(|t| t.path() == Some(p.as_path()))).unwrap_or(0).min(self.tabs.len().saturating_sub(1));
+                let kept = (from..to).filter(|j| Some(*j) != keep).count() - (before - self.tabs.len());
+                if kept > 0 {
+                    self.status = format!("{kept} {}", ui::tr("unsaved tab(s) kept open"));
+                }
+            }
+            Some(TabAction::Revert(i)) => match self.tabs.get_mut(i).map(|t| &mut t.kind) {
+                Some(TabKind::Request(t)) => match collection::load_request(&t.path) {
+                    Ok(req) => {
+                        t.saved = collection::request_text(&t.path, &req);
+                        t.req = req;
+                    }
+                    Err(e) => self.status = e,
+                },
+                Some(TabKind::Settings(t)) => t.data = t.saved.clone(),
+                _ => {}
+            },
+            Some(TabAction::Clone(i)) => {
+                if let Some(Tab { root, kind: TabKind::Request(t) }) = self.tabs.get(i) {
+                    self.dialog = Some(Dialog::Clone { root: root.clone(), path: t.path.clone(), name: format!("{} copy", t.req.name) });
+                }
+            }
+            None => {}
         }
         if new_req && let Some(root) = self.current_root.clone() {
             self.dialog = Some(Dialog::NewRequest { dir: root.clone(), root, name: String::new(), kind: "http".into() });
@@ -932,7 +1072,7 @@ impl ZenApp {
         let mut save = false;
         let col = self.col(&root).cloned();
         match &mut self.tabs[i].kind {
-            TabKind::Request(t) => request_view(ui, t, col.as_ref(), &mut send, &mut save),
+            TabKind::Request(t) => request_view(ui, t, col.as_ref(), self.prefs.stacked, &mut send, &mut save),
             TabKind::Settings(t) => {
                 if let Some(c) = &col {
                     settings_view(ui, t, c, &mut save, &mut self.acts)
@@ -1190,13 +1330,13 @@ impl ZenApp {
             let esc = ui.input(|i| i.key_pressed(Key::Escape));
             match &mut d {
                 Dialog::NewRequest { root, dir, name, kind } => {
-                    ui.heading("New Request");
+                    ui.heading(ui::tr("New Request"));
                     ui.horizontal(|ui| {
                         for (k, label) in [("http", "HTTP"), ("graphql", "GraphQL"), ("grpc", "gRPC"), ("ws", "WebSocket")] {
                             ui.radio_value(kind, k.to_string(), label);
                         }
                     });
-                    ui.label("Request name");
+                    ui.label(ui::tr("Request name"));
                     ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY)).request_focus();
                     let ok = !name.trim().is_empty();
                     if dialog_buttons(ui, "Create", ok) || ok && enter {
@@ -1206,7 +1346,7 @@ impl ZenApp {
                     }
                 }
                 Dialog::ImportCurl { root, dir, text, name } => {
-                    ui.heading("Import cURL");
+                    ui.heading(ui::tr("Import cURL"));
                     ui.label("Paste a cURL command (bash or Windows cmd \"Copy as cURL\")");
                     egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                         ui.add(TextEdit::multiline(text).code_editor().desired_rows(8).desired_width(560.0));
@@ -1221,7 +1361,7 @@ impl ZenApp {
                         }
                         Err(_) => {}
                     }
-                    ui.label("Request name");
+                    ui.label(ui::tr("Request name"));
                     let hint = parsed.as_ref().map(|r| r.name.clone()).unwrap_or_default();
                     ui.add(TextEdit::singleline(name).hint_text(hint).desired_width(f32::INFINITY));
                     if dialog_buttons(ui, "Import", parsed.is_ok()) {
@@ -1235,8 +1375,8 @@ impl ZenApp {
                     }
                 }
                 Dialog::NewFolder { root, dir, name } => {
-                    ui.heading("New Folder");
-                    ui.label("Folder name");
+                    ui.heading(ui::tr("New Folder"));
+                    ui.label(ui::tr("Folder name"));
                     ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY)).request_focus();
                     let ok = !name.trim().is_empty();
                     if dialog_buttons(ui, "Create", ok) || ok && enter {
@@ -1259,7 +1399,7 @@ impl ZenApp {
                     }
                 }
                 Dialog::Clone { root, path, name } => {
-                    ui.heading("Clone Request");
+                    ui.heading(ui::tr("Clone Request"));
                     ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY)).request_focus();
                     let ok = !name.trim().is_empty();
                     if dialog_buttons(ui, "Clone", ok) || ok && enter {
@@ -1269,7 +1409,7 @@ impl ZenApp {
                     }
                 }
                 Dialog::Delete { root, path, label } => {
-                    ui.heading("Delete");
+                    ui.heading(ui::tr("Delete"));
                     ui.label(format!("Are you sure you want to delete {label}? This removes it from disk."));
                     if dialog_buttons(ui, "Delete", true) {
                         keep = false;
@@ -1281,15 +1421,15 @@ impl ZenApp {
                     }
                 }
                 Dialog::NewCollection { name, format } => {
-                    ui.heading("Create Collection");
-                    ui.label("Name");
+                    ui.heading(ui::tr("Create Collection"));
+                    ui.label(ui::tr("Name"));
                     ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY)).request_focus();
                     ui.horizontal(|ui| {
-                        ui.label("File format");
+                        ui.label(ui::tr("File format"));
                         ui.radio_value(format, Format::Yaml, "YAML (OpenCollection)");
                         ui.radio_value(format, Format::Bru, "Bru");
                     });
-                    ui.label(RichText::new("You'll choose the parent folder next.").color(MUTED));
+                    ui.label(RichText::new(ui::tr("You'll choose the parent folder next.")).color(MUTED));
                     let ok = !name.trim().is_empty();
                     if dialog_buttons(ui, "Choose location…", ok) {
                         keep = false;
@@ -1300,7 +1440,7 @@ impl ZenApp {
                     }
                 }
                 Dialog::NewEnv { root, name } => {
-                    ui.heading("Create Environment");
+                    ui.heading(ui::tr("Create Environment"));
                     ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY)).request_focus();
                     let ok = !name.trim().is_empty();
                     if dialog_buttons(ui, "Create", ok) || ok && enter {
@@ -1314,7 +1454,7 @@ impl ZenApp {
                     }
                 }
                 Dialog::DeleteEnv { root, index } => {
-                    ui.heading("Delete Environment");
+                    ui.heading(ui::tr("Delete Environment"));
                     let name = self.col(root).and_then(|c| c.envs.get(*index)).map(|e| e.name.clone()).unwrap_or_default();
                     ui.label(format!("Delete environment \"{name}\"? This removes its file."));
                     if dialog_buttons(ui, "Delete", true) {
@@ -1334,14 +1474,14 @@ impl ZenApp {
                     }
                 }
                 Dialog::CloseTab { index } => {
-                    ui.heading("Unsaved changes");
-                    ui.label("You have unsaved changes in this tab.");
+                    ui.heading(ui::tr("Unsaved changes"));
+                    ui.label(ui::tr("You have unsaved changes in this tab."));
                     ui.horizontal(|ui| {
-                        if ui.button("Don't Save").clicked() {
+                        if ui.button(ui::tr("Don't Save")).clicked() {
                             keep = false;
                             self.close_tab(*index);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(ui::tr("Cancel")).clicked() {
                             keep = false;
                         }
                         if ui::primary_button(ui, "Save").clicked() {
@@ -1353,15 +1493,15 @@ impl ZenApp {
                     });
                 }
                 Dialog::Quit => {
-                    ui.heading("Unsaved changes");
-                    ui.label("Some tabs have unsaved changes.");
+                    ui.heading(ui::tr("Unsaved changes"));
+                    ui.label(ui::tr("Some tabs have unsaved changes."));
                     ui.horizontal(|ui| {
-                        if ui.button("Quit without saving").clicked() {
+                        if ui.button(ui::tr("Quit without saving")).clicked() {
                             keep = false;
                             self.quitting = true;
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(ui::tr("Cancel")).clicked() {
                             keep = false;
                         }
                         if ui::primary_button(ui, "Save all and quit").clicked() {
@@ -1413,7 +1553,7 @@ impl ZenApp {
         let mut open = true;
         let mut action: Option<Dialog> = None;
         let mut status = None;
-        egui::Window::new("Environments").collapsible(false).resizable(true).default_size([820.0, 480.0]).open(&mut open).show(ctx, |ui| {
+        egui::Window::new(ui::tr("Environments")).collapsible(false).resizable(true).default_size([820.0, 480.0]).open(&mut open).show(ctx, |ui| {
             let Some(c) = self.collections.iter_mut().find(|c| c.root == root) else { return };
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
@@ -1431,13 +1571,13 @@ impl ZenApp {
                 ui.separator();
                 ui.vertical(|ui| {
                     let Some(env) = c.envs.get_mut(sel) else {
-                        ui.label(RichText::new("No environments yet. Create one to get started.").color(MUTED));
+                        ui.label(RichText::new(ui::tr("No environments yet. Create one to get started.")).color(MUTED));
                         return;
                     };
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&env.name).strong().size(15.0));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(RichText::new("Delete").color(RED)).frame(false)).clicked() {
+                            if ui.add(egui::Button::new(RichText::new(ui::tr("Delete")).color(RED)).frame(false)).clicked() {
                                 action = Some(Dialog::DeleteEnv { root: root.clone(), index: sel });
                             }
                         });
@@ -1462,7 +1602,7 @@ impl ZenApp {
                         if ui::primary_button(ui, "Save").clicked() {
                             status = Some(collection::save_env(env).map(|()| format!("Saved environment {}", env.name)).unwrap_or_else(|e| format!("Save failed: {e}")));
                         }
-                        if ui.button("Reset").clicked()
+                        if ui.button(ui::tr("Reset")).clicked()
                             && let Ok(fresh) = collection::load_env(&env.path)
                         {
                             *env = fresh;
@@ -1518,7 +1658,7 @@ fn exec_vars(job: &Job) -> Vars {
     vars
 }
 
-fn base64(data: &[u8]) -> String {
+pub(crate) fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
@@ -1540,8 +1680,8 @@ fn dialog_buttons(ui: &mut egui::Ui, ok_label: &str, enabled: bool) -> bool {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ok = ui.add_enabled(enabled, egui::Button::new(RichText::new(ok_label).color(Color32::WHITE).strong()).fill(BRAND)).clicked();
-            if ui.button("Cancel").clicked() {
+            ok = ui.add_enabled(enabled, egui::Button::new(RichText::new(ui::tr(ok_label)).color(Color32::WHITE).strong()).fill(BRAND)).clicked();
+            if ui.button(ui::tr("Cancel")).clicked() {
                 ui.ctx().input_mut(|i| i.events.push(egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }));
             }
         });
@@ -1557,18 +1697,21 @@ fn chevron_clicked(resp: &egui::Response, depth: usize) -> bool {
 
 fn tree_row(ui: &mut egui::Ui, depth: usize, open: Option<bool>, label: RichText, tag: Option<RichText>, selected: bool) -> egui::Response {
     let width = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 24.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::click());
     if selected {
-        ui.painter().rect_filled(rect, 4.0, Color32::from_rgb(232, 232, 232));
+        ui.painter().rect_filled(rect, 6.0, ui::SELECTED);
+        let bar = egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 5.0), egui::vec2(3.0, rect.height() - 10.0));
+        ui.painter().rect_filled(bar, 2.0, BRAND);
     } else if resp.hovered() {
-        ui.painter().rect_filled(rect, 4.0, Color32::from_rgb(240, 240, 240));
+        ui.painter().rect_filled(rect, 6.0, Color32::from_rgb(238, 238, 238));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(4.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
     child.add_space(depth as f32 * 14.0);
     child.spacing_mut().item_spacing.x = 6.0;
     match open {
-        Some(o) => child.label(RichText::new(if o { "▾" } else { "▸" }).color(MUTED)),
-        None => child.label(" "),
+        Some(o) => child.label(RichText::new(if o { icons::CARET_DOWN } else { icons::CARET_RIGHT }).color(MUTED)),
+        None => child.label(ui::tr(" ")),
     };
     if let Some(t) = tag {
         child.label(t);
@@ -1578,33 +1721,33 @@ fn tree_row(ui: &mut egui::Ui, depth: usize, open: Option<bool>, label: RichText
 }
 
 fn folder_menu(ui: &mut egui::Ui, root: &Path, dir: &Path, is_root: bool, acts: &mut Vec<Act>) {
-    if ui.button("New Request").clicked() {
+    if ui::menu_item(ui, icons::FILE_PLUS, "New Request").clicked() {
         acts.push(Act::Dialog(Dialog::NewRequest { root: root.into(), dir: dir.into(), name: String::new(), kind: "http".into() }));
         ui.close();
     }
-    if ui.button("New Folder").clicked() {
+    if ui::menu_item(ui, icons::FOLDER_PLUS, "New Folder").clicked() {
         acts.push(Act::Dialog(Dialog::NewFolder { root: root.into(), dir: dir.into(), name: String::new() }));
         ui.close();
     }
-    if ui.button("Import cURL").clicked() {
+    if ui::menu_item(ui, icons::DOWNLOAD_SIMPLE, "Import cURL").clicked() {
         acts.push(Act::Dialog(Dialog::ImportCurl { root: root.into(), dir: dir.into(), text: String::new(), name: String::new() }));
         ui.close();
     }
-    if ui.button("Run").clicked() {
+    if ui::menu_item(ui, icons::PLAY, "Run").clicked() {
         acts.push(Act::OpenRunner(root.into(), dir.into()));
         ui.close();
     }
-    if ui.button("Settings").clicked() {
+    if ui::menu_item(ui, icons::GEAR_SIX, "Settings").clicked() {
         acts.push(Act::OpenSettings(root.into(), dir.into()));
         ui.close();
     }
     if !is_root {
-        if ui.button("Rename").clicked() {
+        if ui::menu_item(ui, icons::PENCIL_SIMPLE, "Rename").clicked() {
             let name = collection::Collection::open(root).ok().map(|c| c.load_folder(dir).name).filter(|n| !n.is_empty()).unwrap_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().to_string());
             acts.push(Act::Dialog(Dialog::Rename { root: root.into(), path: dir.into(), name, folder: true }));
             ui.close();
         }
-        if ui.button(RichText::new("Delete").color(RED)).clicked() {
+        if ui::menu_item(ui, icons::TRASH, "Delete").clicked() {
             acts.push(Act::Dialog(Dialog::Delete { root: root.into(), path: dir.into(), label: format!("folder \"{}\" and everything in it", dir.file_name().unwrap_or_default().to_string_lossy()) }));
             ui.close();
         }
@@ -1625,7 +1768,7 @@ fn tree(ui: &mut egui::Ui, root: &Path, nodes: &[Node], depth: usize, expanded: 
         match n {
             Node::Folder { name, path, children } => {
                 let open = expanded.contains(path) || !filter.is_empty();
-                let r = tree_row(ui, depth, Some(open), RichText::new(name), None, current == Some(path.as_path()));
+                let r = tree_row(ui, depth, Some(open), RichText::new(ui::rtl(name)), None, current == Some(path.as_path()));
                 // arrow toggles; the name opens folder settings and only ever expands
                 if chevron_clicked(&r, depth) {
                     acts.push(Act::Activate(path.clone()));
@@ -1639,28 +1782,28 @@ fn tree(ui: &mut egui::Ui, root: &Path, nodes: &[Node], depth: usize, expanded: 
                 }
             }
             Node::Request { name, method, kind, path } => {
-                let r = tree_row(ui, depth, None, RichText::new(name), Some(ui::method_tag(method, kind)), current == Some(path.as_path()));
+                let r = tree_row(ui, depth, None, RichText::new(ui::rtl(name)), Some(ui::method_tag(method, kind)), current == Some(path.as_path()));
                 if r.clicked() {
                     acts.push(Act::OpenRequest(root.into(), path.clone()));
                 }
                 r.context_menu(|ui| {
-                    if ui.button("Rename").clicked() {
+                    if ui::menu_item(ui, icons::PENCIL_SIMPLE, "Rename").clicked() {
                         acts.push(Act::Dialog(Dialog::Rename { root: root.into(), path: path.clone(), name: name.clone(), folder: false }));
                         ui.close();
                     }
-                    if ui.button("Clone").clicked() {
+                    if ui::menu_item(ui, icons::COPY, "Clone").clicked() {
                         acts.push(Act::Dialog(Dialog::Clone { root: root.into(), path: path.clone(), name: format!("{name} copy") }));
                         ui.close();
                     }
-                    if ui.button("Run").clicked() {
+                    if ui::menu_item(ui, icons::PLAY, "Run").clicked() {
                         acts.push(Act::OpenRequest(root.into(), path.clone()));
                         ui.close();
                     }
-                    if (kind == "http" || kind == "graphql") && ui.button("Load test").clicked() {
+                    if (kind == "http" || kind == "graphql") && ui::menu_item(ui, icons::LIGHTNING, "Load test").clicked() {
                         acts.push(Act::OpenLoad(root.into(), path.clone()));
                         ui.close();
                     }
-                    if ui.button(RichText::new("Delete").color(RED)).clicked() {
+                    if ui::menu_item(ui, icons::TRASH, "Delete").clicked() {
                         acts.push(Act::Dialog(Dialog::Delete { root: root.into(), path: path.clone(), label: format!("request \"{name}\"") }));
                         ui.close();
                     }
@@ -1723,7 +1866,7 @@ fn url_bar(ui: &mut egui::Ui, t: &mut ReqTab, send: &mut bool, save: &mut bool) 
                 let label = if t.req.method.is_empty() { "Select method".to_string() } else { t.req.method.clone() };
                 egui::ComboBox::from_id_salt(("grpc-method", &t.path)).width(200.0).selected_text(truncate(&label, 30)).show_ui(ui, |ui| {
                     if t.grpc.methods.is_empty() {
-                        ui.label(RichText::new("Load methods from a proto file or reflection").color(MUTED));
+                        ui.label(RichText::new(ui::tr("Load methods from a proto file or reflection")).color(MUTED));
                     }
                     for m in &t.grpc.methods {
                         if ui.selectable_label(t.req.method == m.path, format!("{}  ·  {}", m.path, m.kind)).clicked() {
@@ -1746,14 +1889,14 @@ fn url_bar(ui: &mut egui::Ui, t: &mut ReqTab, send: &mut bool, save: &mut bool) 
                 if ui::primary_button(ui, label).clicked() {
                     *send = true;
                 }
-                if ui.add(egui::Button::new(RichText::new("💾").color(MUTED)).frame(false)).on_hover_text("Save (Ctrl+S)").clicked() {
+                if ui::icon_button(ui, icons::FLOPPY_DISK, &ui::tr("Save (Ctrl+S)")).clicked() {
                     *save = true;
                 }
                 if kind == "http" || kind == "graphql" {
-                    if ui.add(egui::Button::new(RichText::new("</>").color(MUTED).monospace()).frame(false)).on_hover_text("Generate code (cURL)").clicked() {
+                    if ui::icon_button(ui, icons::CODE, &ui::tr("Generate code")).clicked() {
                         ui.data_mut(|d| d.insert_temp(egui::Id::unique("gen-code"), t.path.clone()));
                     }
-                    if ui.add(egui::Button::new(RichText::new("⚡").color(MUTED)).frame(false)).on_hover_text("Load test this request").clicked() {
+                    if ui::icon_button(ui, icons::LIGHTNING, &ui::tr("Load test this request")).clicked() {
                         ui.data_mut(|d| d.insert_temp(egui::Id::unique("load-test"), t.path.clone()));
                     }
                 }
@@ -1779,17 +1922,22 @@ fn apply_curl(req: &mut Request, c: Request) {
     req.files = c.files;
 }
 
-fn request_view(ui: &mut egui::Ui, t: &mut ReqTab, col: Option<&Collection>, send: &mut bool, save: &mut bool) {
+fn request_view(ui: &mut egui::Ui, t: &mut ReqTab, col: Option<&Collection>, stacked: bool, send: &mut bool, save: &mut bool) {
     url_bar(ui, t, send, save);
     ui.add_space(6.0);
-    egui::Panel::right(("response-panel", &t.path)).resizable(true).default_size(ui.available_width() * 0.48).min_size(260.0).show(ui, |ui| {
+    let response = |ui: &mut egui::Ui, t: &mut ReqTab| {
         ui.add_space(2.0);
         match t.req.kind.as_str() {
             "grpc" => grpc_response(ui, t),
             "ws" => ws_response(ui, t),
             _ => http_response(ui, t),
         }
-    });
+    };
+    if stacked {
+        egui::Panel::bottom(("response-panel-b", &t.path)).resizable(true).default_size(ui.available_height() * 0.5).min_size(160.0).show(ui, |ui| response(ui, t));
+    } else {
+        egui::Panel::right(("response-panel", &t.path)).resizable(true).default_size(ui.available_width() * 0.48).min_size(260.0).show(ui, |ui| response(ui, t));
+    }
     egui::CentralPanel::no_frame().show(ui, |ui| request_tabs(ui, t, col));
 }
 
@@ -1829,19 +1977,19 @@ fn request_tabs(ui: &mut egui::Ui, t: &mut ReqTab, col: Option<&Collection>) {
         match t.sub {
             ReqSub::Params => {
                 ui::section_title(ui, "Query");
-                if ui::kv_table(ui, "query", &mut req.query, table) {
+                if ui::kv_editor(ui, "query", &mut req.query, table) {
                     req.url = collection::url_with_query(&req.url, &req.query);
                 }
                 ui.add_space(10.0);
                 ui::section_title(ui, "Path");
                 if req.path_params.is_empty() {
-                    ui.label(RichText::new("Add :name segments to the URL to create path parameters.").color(MUTED).size(12.0));
+                    ui.label(RichText::new(ui::tr("Add :name segments to the URL to create path parameters.")).color(MUTED).size(12.0));
                 } else {
                     egui::Grid::new("path-params").num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
                         for p in &mut req.path_params {
                             ui.label(&p.key);
-                            ui.add(TextEdit::singleline(&mut p.value).hint_text("Value").desired_width(300.0).font(egui::TextStyle::Monospace));
-                            ui.add(TextEdit::singleline(&mut p.description).hint_text("Description").desired_width(200.0));
+                            ui.add(TextEdit::singleline(&mut p.value).hint_text(ui::tr("Value")).desired_width(300.0).font(egui::TextStyle::Monospace));
+                            ui.add(TextEdit::singleline(&mut p.description).hint_text(ui::tr("Description")).desired_width(200.0));
                             ui.end_row();
                         }
                     });
@@ -1882,28 +2030,28 @@ fn request_tabs(ui: &mut egui::Ui, t: &mut ReqTab, col: Option<&Collection>) {
                         ui::code_editor(ui, &mut req.body_sparql, 18);
                     }
                     "formUrlEncoded" => {
-                        ui::kv_table(ui, "form", &mut req.form, table);
+                        ui::kv_editor(ui, "form", &mut req.form, table);
                     }
                     "multipartForm" => {
                         ui::kv_table(ui, "multipart", &mut req.multipart, TableCfg { multipart: true, ..table });
                     }
                     "file" => file_body(ui, req, &root),
                     _ => {
-                        ui.label(RichText::new("No body").color(MUTED));
+                        ui.label(RichText::new(ui::tr("No body")).color(MUTED));
                     }
                 }
             }
             ReqSub::Headers => {
-                ui::kv_table(ui, "headers", &mut req.headers, table);
+                ui::kv_editor(ui, "headers", &mut req.headers, table);
             }
             ReqSub::Auth => auth_editor(ui, &mut req.auth, true),
             ReqSub::Vars => {
                 ui::section_title(ui, "Pre Request");
-                ui::kv_table(ui, "vars-req", &mut req.vars_req, table);
+                ui::kv_editor(ui, "vars-req", &mut req.vars_req, table);
                 ui.add_space(10.0);
                 ui::section_title(ui, "Post Response");
-                ui::kv_table(ui, "vars-res", &mut req.vars_res, TableCfg { value_label: "Expr", ..table });
-                ui.label(RichText::new("Expr is a JavaScript expression, e.g. res.body.token or res('data.items[0].id').").color(MUTED).size(12.0));
+                ui::kv_editor(ui, "vars-res", &mut req.vars_res, TableCfg { value_label: "Expr", ..table });
+                ui.label(RichText::new(ui::tr("Expr is a JavaScript expression, e.g. res.body.token or res('data.items[0].id').")).color(MUTED).size(12.0));
             }
             ReqSub::Script => {
                 ui::section_title(ui, "Pre Request");
@@ -1921,7 +2069,20 @@ fn request_tabs(ui: &mut egui::Ui, t: &mut ReqTab, col: Option<&Collection>) {
                 ui.label(RichText::new("test(\"status is 200\", () => expect(res.getStatus()).to.equal(200));").color(MUTED).monospace().size(11.5));
             }
             ReqSub::Docs => {
-                ui::code_editor(ui, &mut req.docs, 18);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui::link_button(ui, if t.docs_edit { "Preview" } else { "Edit" }).clicked() {
+                            t.docs_edit = !t.docs_edit;
+                        }
+                    });
+                });
+                if t.docs_edit {
+                    ui::code_editor(ui, &mut req.docs, 18);
+                } else if req.docs.trim().is_empty() {
+                    ui.label(RichText::new(ui::tr("No documentation yet. Click Edit to write Markdown docs for this request.")).color(MUTED));
+                } else {
+                    ui::markdown(ui, &req.docs);
+                }
             }
             ReqSub::Settings => request_settings(ui, req),
             ReqSub::Messages => messages_editor(ui, t, &root),
@@ -1938,8 +2099,8 @@ fn file_body(ui: &mut egui::Ui, req: &mut Request, root: &Path) {
                 select = Some(i);
             }
             ui.label(RichText::new(&f.value).monospace());
-            ui.add(TextEdit::singleline(&mut f.content_type).hint_text("content-type").desired_width(180.0));
-            if ui.small_button("🗑").clicked() {
+            ui.add(TextEdit::singleline(&mut f.content_type).hint_text(ui::tr("content-type")).desired_width(180.0));
+            if ui.small_button(icons::TRASH).clicked() {
                 remove = Some(i);
             }
         });
@@ -1952,7 +2113,7 @@ fn file_body(ui: &mut egui::Ui, req: &mut Request, root: &Path) {
     if let Some(i) = remove {
         req.files.remove(i);
     }
-    if ui.button("Add file…").clicked()
+    if ui.button(ui::tr("Add file…")).clicked()
         && let Some(p) = rfd::FileDialog::new().pick_file()
     {
         // store collection-relative paths when possible, like Bruno
@@ -1969,28 +2130,28 @@ fn auth_editor(ui: &mut egui::Ui, auth: &mut crate::model::Auth, allow_inherit: 
     }
     let known = modes.iter().any(|(m, _)| *m == auth.mode);
     let label = modes.iter().find(|(m, _)| *m == auth.mode).map(|(_, l)| l.to_string()).unwrap_or(auth.mode.clone());
-    egui::ComboBox::from_id_salt("auth-mode").selected_text(label).width(170.0).show_ui(ui, |ui| {
+    egui::ComboBox::from_id_salt("auth-mode").selected_text(ui::tr(&label)).width(170.0).show_ui(ui, |ui| {
         for (m, l) in &modes {
-            ui.selectable_value(&mut auth.mode, m.to_string(), *l);
+            ui.selectable_value(&mut auth.mode, m.to_string(), ui::tr(l));
         }
     });
     ui.add_space(6.0);
     egui::Grid::new("auth-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| match auth.mode.as_str() {
         "basic" => {
-            ui.label("Username");
+            ui.label(ui::tr("Username"));
             ui.add(TextEdit::singleline(&mut auth.username).desired_width(320.0).font(egui::TextStyle::Monospace));
             ui.end_row();
-            ui.label("Password");
+            ui.label(ui::tr("Password"));
             ui.add(TextEdit::singleline(&mut auth.password).password(true).desired_width(320.0).font(egui::TextStyle::Monospace));
             ui.end_row();
         }
         "bearer" => {
-            ui.label("Token");
+            ui.label(ui::tr("Token"));
             ui.add(TextEdit::singleline(&mut auth.token).desired_width(420.0).font(egui::TextStyle::Monospace));
             ui.end_row();
         }
         "inherit" => {
-            ui.label(RichText::new("Auth is inherited from the nearest folder or the collection.").color(MUTED));
+            ui.label(RichText::new(ui::tr("Auth is inherited from the nearest folder or the collection.")).color(MUTED));
             ui.end_row();
         }
         "none" => {}
@@ -2033,9 +2194,9 @@ fn messages_editor(ui: &mut egui::Ui, t: &mut ReqTab, root: &Path) {
     let is_grpc = t.req.kind == "grpc";
     if is_grpc {
         ui.horizontal(|ui| {
-            ui.label("Proto file");
-            ui.add(TextEdit::singleline(&mut t.req.proto_path).hint_text("empty = use server reflection").desired_width(280.0));
-            if ui.button("Browse…").clicked()
+            ui.label(ui::tr("Proto file"));
+            ui.add(TextEdit::singleline(&mut t.req.proto_path).hint_text(ui::tr("empty = use server reflection")).desired_width(280.0));
+            if ui.button(ui::tr("Browse…")).clicked()
                 && let Some(p) = rfd::FileDialog::new().add_filter("proto", &["proto"]).pick_file()
             {
                 t.req.proto_path = p.strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| p.to_string_lossy().to_string());
@@ -2045,14 +2206,14 @@ fn messages_editor(ui: &mut egui::Ui, t: &mut ReqTab, root: &Path) {
             }
         });
         ui.horizontal(|ui| {
-            if ui.button("Load from proto").clicked() {
+            if ui.button(ui::tr("Load from proto")).clicked() {
                 ui.data_mut(|d| d.insert_temp(egui::Id::unique("grpc-load"), (t.path.clone(), false)));
             }
-            if ui.button("Use reflection").clicked() {
+            if ui.button(ui::tr("Use reflection")).clicked() {
                 ui.data_mut(|d| d.insert_temp(egui::Id::unique("grpc-load"), (t.path.clone(), true)));
             }
             if let (Some(pool), false) = (&t.grpc.pool, t.req.method.is_empty())
-                && ui.button("Generate sample message").clicked()
+                && ui.button(ui::tr("Generate sample message")).clicked()
                 && let Ok(sample) = grpc::sample_message(pool, &t.req.method)
             {
                 match t.req.messages.first_mut() {
@@ -2081,11 +2242,11 @@ fn messages_editor(ui: &mut egui::Ui, t: &mut ReqTab, root: &Path) {
                         ui.selectable_value(&mut m.kind, k.to_string(), k);
                     }
                 });
-                if ui.add_enabled(t.ws.connected, egui::Button::new(RichText::new("Send").color(BRAND))).clicked() {
+                if ui.add_enabled(t.ws.connected, egui::Button::new(RichText::new(ui::tr("Send")).color(BRAND))).clicked() {
                     send_idx = Some(i);
                 }
             }
-            if n > 1 && ui.small_button("🗑").clicked() {
+            if n > 1 && ui.small_button(icons::TRASH).clicked() {
                 remove = Some(i);
             }
         });
@@ -2096,7 +2257,7 @@ fn messages_editor(ui: &mut egui::Ui, t: &mut ReqTab, root: &Path) {
         t.req.messages.remove(i);
     }
     if is_grpc && !t.req.grpc_method_type.contains("streaming") && n > 0 {
-        ui.label(RichText::new("Unary and server-streaming calls send the first message.").color(MUTED).size(12.0));
+        ui.label(RichText::new(ui::tr("Unary and server-streaming calls send the first message.")).color(MUTED).size(12.0));
     }
     if ui::link_button(ui, "+ Add message").clicked() {
         let kind = if is_grpc { String::new() } else { "json".into() };
@@ -2144,6 +2305,21 @@ fn http_response(ui: &mut egui::Ui, t: &mut ReqTab) {
             status_line(ui, Some((r.status, &r.status_text)), Some(r.time_ms), Some(r.body.len()));
         }
     });
+    let unresolved = o.sent.as_ref().map(unresolved_vars).unwrap_or_default();
+    if t.res_sub == ResSub::Response && o.response.is_some() && response_toolbar(ui, t) {
+        t.outcome = None;
+        return;
+    }
+    if !unresolved.is_empty() {
+        egui::Frame::new().fill(Color32::from_rgb(255, 247, 230)).stroke(Stroke::new(1.0, Color32::from_rgb(240, 200, 140))).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(format!("{} {}", ui::tr("Unresolved variables:"), unresolved.join(", "))).color(Color32::from_rgb(150, 90, 10)).size(12.0))
+                .on_hover_text(ui::tr("These {{variables}} were not defined in the environment, collection, folder, request or runtime and were sent literally."));
+        });
+        ui.add_space(4.0);
+    }
+    let body_text = if t.res_sub == ResSub::Response { response_text(t) } else { String::new() };
+    let Some(o) = &t.outcome else { return };
     egui::ScrollArea::both().id_salt(("res-scroll", &t.path)).auto_shrink([false, false]).show(ui, |ui| match t.res_sub {
         ResSub::Response => {
             if let Some(e) = &o.error {
@@ -2151,10 +2327,10 @@ fn http_response(ui: &mut egui::Ui, t: &mut ReqTab) {
                 ui.add_space(6.0);
             }
             if o.skipped {
-                ui.label(RichText::new("Request skipped by script (bru.runner.skipRequest).").color(MUTED));
+                ui.label(RichText::new(ui::tr("Request skipped by script (bru.runner.skipRequest).")).color(MUTED));
             }
             if o.response.is_some() {
-                ui::code_view(ui, &t.pretty);
+                ui::code_view(ui, &body_text);
             }
         }
         ResSub::Headers => {
@@ -2176,7 +2352,7 @@ fn http_response(ui: &mut egui::Ui, t: &mut ReqTab) {
                     ui.label(RichText::new(format!("{k}: {v}")).monospace().color(Color32::from_rgb(90, 90, 90)));
                 }
                 if p.basic_auth.is_some() {
-                    ui.label(RichText::new("authorization: Basic ••••••").monospace().color(Color32::from_rgb(90, 90, 90)));
+                    ui.label(RichText::new(ui::tr("authorization: Basic ••••••")).monospace().color(Color32::from_rgb(90, 90, 90)));
                 }
                 if let crate::http::BodyData::Raw(b) = &p.body
                     && !b.is_empty()
@@ -2207,7 +2383,7 @@ fn http_response(ui: &mut egui::Ui, t: &mut ReqTab) {
         }
         ResSub::Tests => {
             if tests_total == 0 {
-                ui.label(RichText::new("No tests or assertions ran.").color(MUTED));
+                ui.label(RichText::new(ui::tr("No tests or assertions ran.")).color(MUTED));
             } else {
                 ui.label(RichText::new(format!("Passed {} / {}", tests_total - tests_failed, tests_total)).color(if tests_failed == 0 { GREEN } else { RED }).strong());
                 ui.add_space(4.0);
@@ -2216,9 +2392,9 @@ fn http_response(ui: &mut egui::Ui, t: &mut ReqTab) {
                 ui::section_title(ui, "Tests");
                 for x in &o.tests {
                     if x.passed {
-                        ui.colored_label(GREEN, format!("✔ {}", x.name));
+                        ui.colored_label(GREEN, format!("{} {}", icons::CHECK_CIRCLE, x.name));
                     } else {
-                        ui.colored_label(RED, format!("✖ {} — {}", x.name, x.error));
+                        ui.colored_label(RED, format!("{} {} — {}", icons::X_CIRCLE, x.name, x.error));
                     }
                 }
             }
@@ -2227,13 +2403,113 @@ fn http_response(ui: &mut egui::Ui, t: &mut ReqTab) {
                 ui::section_title(ui, "Assertions");
                 for (name, r) in &o.asserts {
                     match r {
-                        Ok(()) => ui.colored_label(GREEN, format!("✔ {name}")),
-                        Err(e) => ui.colored_label(RED, format!("✖ {name} — {e}")),
+                        Ok(()) => ui.colored_label(GREEN, format!("{} {name}", icons::CHECK_CIRCLE)),
+                        Err(e) => ui.colored_label(RED, format!("{} {name} — {e}", icons::X_CIRCLE)),
                     };
                 }
             }
         }
     });
+}
+
+/// `{{names}}` still present in the request that was sent.
+fn unresolved_vars(p: &crate::http::Prepared) -> Vec<String> {
+    let mut texts: Vec<&str> = vec![&p.url];
+    texts.extend(p.headers.iter().flat_map(|(k, v)| [k.as_str(), v.as_str()]));
+    if let crate::http::BodyData::Raw(b) = &p.body {
+        texts.push(b);
+    }
+    let mut names: Vec<String> = vec![];
+    for text in texts {
+        let mut rest = text;
+        while let Some(start) = rest.find("{{") {
+            let after = &rest[start + 2..];
+            let Some(end) = after.find("}}") else { break };
+            let name = after[..end].trim();
+            if !name.is_empty() && !name.contains(['{', '}', '\n']) && !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+            rest = &after[end + 2..];
+        }
+    }
+    names
+}
+
+/// Response format / filter / copy / save / clear row. Returns true when the response was cleared.
+fn response_toolbar(ui: &mut egui::Ui, t: &mut ReqTab) -> bool {
+    let mut clear = false;
+    ui.horizontal(|ui| {
+        let views = [(ResView::Pretty, "Pretty"), (ResView::Raw, "Raw"), (ResView::Hex, "Hex"), (ResView::Base64, "Base64")];
+        let label = views.iter().find(|(v, _)| *v == t.view).map(|(_, l)| *l).unwrap_or("Pretty");
+        egui::ComboBox::from_id_salt(("res-view", &t.path)).selected_text(ui::tr(label)).width(84.0).show_ui(ui, |ui| {
+            for (v, l) in views {
+                ui.selectable_value(&mut t.view, v, ui::tr(l));
+            }
+        });
+        let right = 92.0;
+        if t.view == ResView::Pretty {
+            let bad = t.filtered.1.starts_with("JSONPath error");
+            ui.add(TextEdit::singleline(&mut t.filter).hint_text(ui::tr("Filter with JSONPath, e.g. $.data[0].id")).desired_width((ui.available_width() - right).max(80.0)).font(egui::TextStyle::Monospace).text_color(if bad { RED } else { TEXT }));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui::icon_button(ui, icons::TRASH, &ui::tr("Clear response")).clicked() {
+                clear = true;
+            }
+            if ui::icon_button(ui, icons::FLOPPY_DISK, &ui::tr("Save response to file")).clicked()
+                && let Some(r) = t.outcome.as_ref().and_then(|o| o.response.as_ref())
+            {
+                let ct = r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.to_lowercase()).unwrap_or_default();
+                let ext = [("json", "json"), ("xml", "xml"), ("html", "html"), ("png", "png"), ("jpeg", "jpg"), ("gif", "gif"), ("pdf", "pdf"), ("csv", "csv"), ("javascript", "js")].iter().find(|(k, _)| ct.contains(k)).map(|(_, e)| *e).unwrap_or("txt");
+                if let Some(file) = rfd::FileDialog::new().set_file_name(format!("{}.{ext}", collection::safe_name(&t.req.name))).save_file() {
+                    let result = std::fs::write(&file, &r.body);
+                    ui.data_mut(|d| d.insert_temp(egui::Id::unique("status"), match result {
+                        Ok(()) => format!("{} {}", ui::tr("Response saved to"), file.display()),
+                        Err(e) => format!("Save failed: {e}"),
+                    }));
+                }
+            }
+            if ui::icon_button(ui, icons::COPY, &ui::tr("Copy response")).clicked() {
+                ui.ctx().copy_text(response_text(t));
+                ui.data_mut(|d| d.insert_temp(egui::Id::unique("status"), ui::tr("Response copied to clipboard")));
+            }
+        });
+    });
+    ui.add_space(4.0);
+    clear
+}
+
+/// Response body in the selected view, cached until the view, filter or response changes.
+fn response_text(t: &mut ReqTab) -> String {
+    let key = format!("{}|{}", t.view as u8, if t.view == ResView::Pretty { t.filter.trim() } else { "" });
+    if t.filtered.0 != key {
+        let body = t.outcome.as_ref().and_then(|o| o.response.as_ref()).map(|r| r.body.as_slice()).unwrap_or_default();
+        let shown = &body[..body.len().min(MAX_SHOWN_BODY)];
+        let text = match t.view {
+            ResView::Pretty if t.filter.trim().is_empty() => t.pretty.clone(),
+            ResView::Pretty => match serde_json::from_slice::<serde_json::Value>(body) {
+                Ok(v) => match crate::interp::json_path(&v, &t.filter) {
+                    Ok(found) => serde_json::to_string_pretty(&found).unwrap_or_default(),
+                    Err(e) => format!("JSONPath error: {e}"),
+                },
+                Err(_) => "JSONPath error: the response is not JSON".into(),
+            },
+            ResView::Raw => String::from_utf8_lossy(shown).into_owned(),
+            ResView::Hex => hex_dump(&shown[..shown.len().min(256 * 1024)]),
+            ResView::Base64 => base64(shown),
+        };
+        t.filtered = (key, text);
+    }
+    t.filtered.1.clone()
+}
+
+fn hex_dump(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() * 4 + 16);
+    for (i, row) in data.chunks(16).enumerate() {
+        let hex: Vec<String> = row.iter().map(|b| format!("{b:02x}")).collect();
+        let ascii: String = row.iter().map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect();
+        out.push_str(&format!("{:08x}  {:<47}  |{ascii}|\n", i * 16, hex.join(" ")));
+    }
+    out
 }
 
 fn grpc_response(ui: &mut egui::Ui, t: &mut ReqTab) {
@@ -2295,17 +2571,17 @@ fn ws_response(ui: &mut egui::Ui, t: &mut ReqTab) {
             if ui::link_button(ui, "Clear").clicked() {
                 t.ws.log.clear();
             }
-            ui.label(if t.ws.connected { RichText::new("● Connected").color(GREEN) } else { RichText::new("● Disconnected").color(MUTED) });
+            ui.label(if t.ws.connected { RichText::new(ui::tr("● Connected")).color(GREEN) } else { RichText::new(ui::tr("● Disconnected")).color(MUTED) });
         });
     });
     egui::ScrollArea::vertical().id_salt(("ws-log", &t.path)).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
         for (time, e) in &t.ws.log {
             let (arrow, color, text) = match e {
-                ws::Event::Opened { status, .. } => ("✔", GREEN, format!("Connected ({status})")),
+                ws::Event::Opened { status, .. } => (icons::CHECK_CIRCLE, GREEN, format!("Connected ({status})")),
                 ws::Event::Sent(s) => ("↑", BRAND, s.clone()),
                 ws::Event::Received(s) => ("↓", GREEN, s.clone()),
                 ws::Event::Closed(s) => ("■", MUTED, format!("Closed: {s}")),
-                ws::Event::Error(s) => ("✖", RED, s.clone()),
+                ws::Event::Error(s) => (icons::X_CIRCLE, RED, s.clone()),
             };
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(arrow).color(color).strong());
@@ -2344,7 +2620,7 @@ fn settings_view(ui: &mut egui::Ui, t: &mut SettingsTab, c: &Collection, save: &
         match t.sub {
             SetSub::Overview => {
                 let title = if t.is_collection { c.name.clone() } else { d.name.clone() };
-                ui.label(RichText::new(format!("📦 {title}")).strong().size(17.0));
+                ui.label(RichText::new(format!("{} {title}", icons::PACKAGE)).strong().size(17.0));
                 ui.add_space(10.0);
                 let row = |ui: &mut egui::Ui, icon: &str, head: &str, body: String| {
                     ui.horizontal(|ui| {
@@ -2356,20 +2632,20 @@ fn settings_view(ui: &mut egui::Ui, t: &mut SettingsTab, c: &Collection, save: &
                     });
                     ui.add_space(8.0);
                 };
-                row(ui, "📁", "Location", t.dir.display().to_string());
+                row(ui, icons::FOLDER_SIMPLE, "Location", t.dir.display().to_string());
                 if t.is_collection {
-                    row(ui, "🗎", "Format", match c.format {
+                    row(ui, icons::FILE_TEXT, "Format", match c.format {
                         Format::Yaml => "OpenCollection YAML (.yml)".into(),
                         Format::Bru => "Bru (.bru)".into(),
                     });
-                    row(ui, "🌐", "Environments", format!("{} collection environments", c.envs.len()));
-                    row(ui, "⇄", "Requests", format!("{} requests in collection", c.request_count()));
+                    row(ui, icons::GLOBE, "Environments", format!("{} collection environments", c.envs.len()));
+                    row(ui, icons::LIST_BULLETS, "Requests", format!("{} requests in collection", c.request_count()));
                 } else {
                     ui.horizontal(|ui| {
-                        ui.label("Folder name");
+                        ui.label(ui::tr("Folder name"));
                         ui.add(TextEdit::singleline(&mut d.name).desired_width(260.0));
                     });
-                    ui.label(RichText::new("Changing the name here keeps the directory name; use Rename in the sidebar to rename both.").color(MUTED).size(12.0));
+                    ui.label(RichText::new(ui::tr("Changing the name here keeps the directory name; use Rename in the sidebar to rename both.")).color(MUTED).size(12.0));
                 }
                 ui.add_space(6.0);
                 if ui::primary_button(ui, &format!("Run {}", if t.is_collection { "collection" } else { "folder" })).clicked() {
@@ -2377,15 +2653,15 @@ fn settings_view(ui: &mut egui::Ui, t: &mut SettingsTab, c: &Collection, save: &
                 }
             }
             SetSub::Headers => {
-                ui.label(RichText::new("Headers here apply to every request inside.").color(MUTED).size(12.0));
-                ui::kv_table(ui, "folder-headers", &mut d.headers, table);
+                ui.label(RichText::new(ui::tr("Headers here apply to every request inside.")).color(MUTED).size(12.0));
+                ui::kv_editor(ui, "folder-headers", &mut d.headers, table);
             }
             SetSub::Vars => {
                 ui::section_title(ui, "Pre Request");
-                ui::kv_table(ui, "folder-vars-req", &mut d.vars_req, table);
+                ui::kv_editor(ui, "folder-vars-req", &mut d.vars_req, table);
                 ui.add_space(10.0);
                 ui::section_title(ui, "Post Response");
-                ui::kv_table(ui, "folder-vars-res", &mut d.vars_res, TableCfg { value_label: "Expr", ..table });
+                ui::kv_editor(ui, "folder-vars-res", &mut d.vars_res, TableCfg { value_label: "Expr", ..table });
             }
             SetSub::Auth => auth_editor(ui, &mut d.auth, !t.is_collection),
             SetSub::Script => {
@@ -2399,7 +2675,23 @@ fn settings_view(ui: &mut egui::Ui, t: &mut SettingsTab, c: &Collection, save: &
                 ui::code_editor(ui, &mut d.tests, 18);
             }
             SetSub::Docs => {
-                ui::code_editor(ui, &mut d.docs, 18);
+                let edit_id = ui.scope_id().with("docs-edit");
+                let mut edit = ui.data(|m| m.get_temp(edit_id).unwrap_or(false));
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui::link_button(ui, if edit { "Preview" } else { "Edit" }).clicked() {
+                            edit = !edit;
+                        }
+                    });
+                });
+                ui.data_mut(|m| m.insert_temp(edit_id, edit));
+                if edit {
+                    ui::code_editor(ui, &mut d.docs, 18);
+                } else if d.docs.trim().is_empty() {
+                    ui.label(RichText::new(ui::tr("No documentation yet. Click Edit to write Markdown docs.")).color(MUTED));
+                } else {
+                    ui::markdown(ui, &d.docs);
+                }
             }
         }
     });
@@ -2450,19 +2742,21 @@ fn runner_view(ui: &mut egui::Ui, r: &mut RunnerTab, col: Option<&Collection>) -
             }
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Total Requests: {}", r.results.len())).strong());
-            ui.label(RichText::new(format!("Passed: {passed}")).color(GREEN));
-            ui.label(RichText::new(format!("Failed: {failed}")).color(RED));
-            ui.label(RichText::new(format!("Skipped: {skipped}")).color(MUTED));
+            let filters = [(None, format!("{} {}", ui::tr("All"), r.results.len()), TEXT), (Some(RowState::Passed), format!("{} {passed}", ui::tr("Passed")), GREEN), (Some(RowState::Failed), format!("{} {failed}", ui::tr("Failed")), RED), (Some(RowState::Skipped), format!("{} {skipped}", ui::tr("Skipped")), MUTED)];
+            for (state, label, color) in filters {
+                if ui.add(egui::Button::selectable(r.show == state, RichText::new(label).color(color).strong())).clicked() {
+                    r.show = state;
+                }
+            }
         });
         ui.separator();
         egui::ScrollArea::vertical().id_salt("runner-results").auto_shrink([false, false]).show(ui, |ui| {
-            for (i, row) in r.results.iter().enumerate() {
+            for (i, row) in r.results.iter().enumerate().filter(|(_, row)| r.show.is_none_or(|s| s == row_state(row))) {
                 let o = row.outcome.as_ref();
                 let (icon, color) = match row_state(row) {
-                    RowState::Passed => ("✔", GREEN),
-                    RowState::Failed => ("✖", RED),
-                    RowState::Skipped => ("⤼", MUTED),
+                    RowState::Passed => (icons::CHECK_CIRCLE, GREEN),
+                    RowState::Failed => (icons::X_CIRCLE, RED),
+                    RowState::Skipped => (icons::SKIP_FORWARD, MUTED),
                 };
                 let resp = ui
                     .horizontal(|ui| {
@@ -2488,12 +2782,12 @@ fn runner_view(ui: &mut egui::Ui, r: &mut RunnerTab, col: Option<&Collection>) -
                             ui.colored_label(RED, e);
                         }
                         for t in &o.tests {
-                            if t.passed { ui.colored_label(GREEN, format!("✔ {}", t.name)) } else { ui.colored_label(RED, format!("✖ {} — {}", t.name, t.error)) };
+                            if t.passed { ui.colored_label(GREEN, format!("{} {}", icons::CHECK_CIRCLE, t.name)) } else { ui.colored_label(RED, format!("{} {} — {}", icons::X_CIRCLE, t.name, t.error)) };
                         }
                         for (n, a) in &o.asserts {
                             match a {
-                                Ok(()) => ui.colored_label(GREEN, format!("✔ {n}")),
-                                Err(e) => ui.colored_label(RED, format!("✖ {n} — {e}")),
+                                Ok(()) => ui.colored_label(GREEN, format!("{} {n}", icons::CHECK_CIRCLE)),
+                                Err(e) => ui.colored_label(RED, format!("{} {n} — {e}", icons::X_CIRCLE)),
                             };
                         }
                         if let Some(res) = &o.response {
@@ -2505,29 +2799,29 @@ fn runner_view(ui: &mut egui::Ui, r: &mut RunnerTab, col: Option<&Collection>) -
         });
     });
     egui::CentralPanel::no_frame().show(ui, |ui| {
-        ui.label(RichText::new("🏃 Runner").strong().size(15.0));
+        ui.label(RichText::new(format!("{} {}", icons::PERSON_SIMPLE_RUN, ui::tr("Runner"))).strong().size(15.0));
         ui.label(format!("You have {} requests in this {}.", r.items.len(), if col.is_some_and(|c| c.root == r.dir) { "collection" } else { "folder" }));
         ui.add_space(10.0);
-        ui.label(RichText::new("Timings").strong());
-        ui.label("Delay between requests (ms)");
-        ui.add(TextEdit::singleline(&mut r.delay).hint_text("e.g. 5").desired_width(f32::INFINITY));
+        ui.label(RichText::new(ui::tr("Timings")).strong());
+        ui.label(ui::tr("Delay between requests (ms)"));
+        ui.add(TextEdit::singleline(&mut r.delay).hint_text(ui::tr("e.g. 5")).desired_width(f32::INFINITY));
         ui.add_space(8.0);
-        ui.label(RichText::new("Filters").strong());
+        ui.label(RichText::new(ui::tr("Filters")).strong());
         ui.columns(2, |cols| {
-            cols[0].label("Include tags");
-            cols[0].add(TextEdit::singleline(&mut r.include_tags).hint_text("e.g., smoke, regression"));
-            cols[1].label("Exclude tags");
-            cols[1].add(TextEdit::singleline(&mut r.exclude_tags).hint_text("e.g., smoke, regression"));
+            cols[0].label(ui::tr("Include tags"));
+            cols[0].add(TextEdit::singleline(&mut r.include_tags).hint_text(ui::tr("e.g., smoke, regression")));
+            cols[1].label(ui::tr("Exclude tags"));
+            cols[1].add(TextEdit::singleline(&mut r.exclude_tags).hint_text(ui::tr("e.g., smoke, regression")));
         });
         ui.add_space(8.0);
-        ui.label("Iterations");
+        ui.label(ui::tr("Iterations"));
         ui.add(TextEdit::singleline(&mut r.iterations).desired_width(200.0));
         ui.add_space(14.0);
         ui.horizontal(|ui| {
             let n = r.items.iter().filter(|i| i.4).count();
             if running {
                 ui.spinner();
-                if ui.button("Stop").clicked() {
+                if ui.button(ui::tr("Stop")).clicked() {
                     r.stop.store(true, Ordering::Relaxed);
                 }
             } else if ui.add_enabled(n > 0, egui::Button::new(RichText::new(format!("Run {n} Requests")).color(Color32::WHITE).strong()).fill(BRAND)).clicked() {
@@ -2542,6 +2836,7 @@ fn runner_view(ui: &mut egui::Ui, r: &mut RunnerTab, col: Option<&Collection>) -
     run
 }
 
+#[derive(PartialEq, Clone, Copy)]
 enum RowState {
     Passed,
     Failed,
@@ -2583,6 +2878,13 @@ impl eframe::App for ZenApp {
             let sel = self.env_sel.get(&root).copied().unwrap_or(0);
             self.env_window = Some((root, sel));
         }
+        self.extra_shortcuts(&ctx);
+        if (ctx.zoom_factor() - self.prefs.zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(self.prefs.zoom);
+        }
+        if let Some(s) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::unique("status"))) {
+            self.status = s;
+        }
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.tabs.iter().any(Tab::dirty) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.dialog = Some(Dialog::Quit);
@@ -2590,9 +2892,25 @@ impl eframe::App for ZenApp {
 
         egui::Panel::bottom("statusbar").frame(egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin::symmetric(10, 3))).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&self.status).size(11.5).color(Color32::from_rgb(110, 110, 110)));
+                ui.label(RichText::new(ui::rtl(&self.status)).size(11.5).color(Color32::from_rgb(110, 110, 110)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(concat!("ZenProbe v", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED));
+                    ui.separator();
+                    if ui.add(egui::Button::new(RichText::new(format!("{} {}", icons::GEAR_SIX, ui::tr("Preferences"))).size(11.5).color(MUTED)).frame(false)).on_hover_text(ui::tr("Ctrl+,")).clicked() {
+                        self.prefs_open = true;
+                    }
+                    let layout = if self.prefs.stacked { icons::SQUARE_SPLIT_VERTICAL } else { icons::SQUARE_SPLIT_HORIZONTAL };
+                    if ui.add(egui::Button::new(RichText::new(layout).size(12.5).color(MUTED)).frame(false)).on_hover_text(ui::tr("Toggle response layout (side by side / stacked)")).clicked() {
+                        self.prefs.stacked = !self.prefs.stacked;
+                        self.save_state();
+                    }
+                    if ui.add(egui::Button::new(RichText::new(format!("{} {}", icons::MAGNIFYING_GLASS, ui::tr("Search"))).size(11.5).color(MUTED)).frame(false)).on_hover_text(ui::tr("Ctrl+K")).clicked() {
+                        self.search = Some((String::new(), 0));
+                    }
+                    if ui.add(egui::Button::new(RichText::new(format!("{}  {:.0}%", ui::tr("Zoom"), self.prefs.zoom * 100.0)).size(11.5).color(MUTED)).frame(false)).on_hover_text(ui::tr("Click to reset (Ctrl+0)")).clicked() {
+                        self.prefs.zoom = 1.0;
+                        self.save_state();
+                    }
                 });
             });
         });
@@ -2620,26 +2938,197 @@ impl eframe::App for ZenApp {
         self.dialogs(&ctx);
         self.env_window(&ctx);
         self.code_window(&ctx);
+        self.prefs_window(&ctx);
+        self.search_window(&ctx);
     }
 }
 
 impl ZenApp {
+    fn extra_shortcuts(&mut self, ctx: &egui::Context) {
+        let sc = |m: Modifiers, k: Key| KeyboardShortcut::new(m, k);
+        let shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        // Ctrl+Shift+Tab is consumed before Ctrl+Tab so the looser match can't take it
+        let (prev, next, new_req, search, prefs, reopen, close_all, zoom_in, zoom_out, zoom_reset, nth) = ctx.input_mut(|i| {
+            (
+                i.consume_shortcut(&sc(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab)),
+                i.consume_shortcut(&sc(Modifiers::CTRL, Key::Tab)),
+                i.consume_shortcut(&sc(Modifiers::COMMAND, Key::N)),
+                i.consume_shortcut(&sc(Modifiers::COMMAND, Key::K)) || i.consume_shortcut(&sc(Modifiers::COMMAND, Key::P)),
+                i.consume_shortcut(&sc(Modifiers::COMMAND, Key::Comma)),
+                i.consume_shortcut(&sc(shift, Key::T)),
+                i.consume_shortcut(&sc(shift, Key::W)),
+                i.consume_shortcut(&sc(Modifiers::COMMAND, Key::Equals)) || i.consume_shortcut(&sc(Modifiers::COMMAND, Key::Plus)),
+                i.consume_shortcut(&sc(Modifiers::COMMAND, Key::Minus)),
+                i.consume_shortcut(&sc(Modifiers::COMMAND, Key::Num0)),
+                [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].iter().position(|k| i.consume_shortcut(&sc(Modifiers::COMMAND, *k))),
+            )
+        });
+        let n = self.tabs.len();
+        if prev && n > 0 {
+            self.active = (self.active + n - 1) % n;
+        } else if next && n > 0 {
+            self.active = (self.active + 1) % n;
+        }
+        if let Some(k) = nth.filter(|_| n > 0) {
+            self.active = if k == 8 { n - 1 } else { k.min(n - 1) };
+        }
+        if new_req && let Some(root) = self.current_root.clone() {
+            self.dialog = Some(Dialog::NewRequest { dir: root.clone(), root, name: String::new(), kind: "http".into() });
+        }
+        if search {
+            self.search = Some((String::new(), 0));
+        }
+        if prefs {
+            self.prefs_open = true;
+        }
+        if reopen && let Some((root, path)) = self.closed.pop() {
+            self.open_request(&root, &path);
+        }
+        if close_all {
+            let n = self.tabs.len();
+            self.tabs.retain(|t| t.dirty());
+            self.active = 0;
+            if !self.tabs.is_empty() && n > 0 {
+                self.status = format!("{} {}", self.tabs.len(), ui::tr("unsaved tab(s) kept open"));
+            }
+        }
+        let zoom = if zoom_in { self.prefs.zoom + 0.1 } else if zoom_out { self.prefs.zoom - 0.1 } else if zoom_reset { 1.0 } else { self.prefs.zoom };
+        if (zoom - self.prefs.zoom).abs() > 0.001 {
+            self.prefs.zoom = (zoom * 10.0).round() / 10.0;
+            self.prefs.zoom = self.prefs.zoom.clamp(0.5, 2.0);
+            self.save_state();
+        }
+    }
+
+    fn prefs_window(&mut self, ctx: &egui::Context) {
+        if !self.prefs_open {
+            return;
+        }
+        let before = (self.prefs.clone(), crate::i18n::urdu());
+        let mut open = true;
+        egui::Window::new(ui::tr("Preferences")).id(egui::Id::unique("prefs-window")).collapsible(false).resizable(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).open(&mut open).show(ctx, |ui| {
+            ui.set_min_width(420.0);
+            egui::Grid::new("prefs-grid").num_columns(2).spacing([24.0, 12.0]).show(ui, |ui| {
+                ui.label(RichText::new(ui::tr("Language")).strong());
+                ui.horizontal(|ui| {
+                    let mut urdu = crate::i18n::urdu();
+                    ui.radio_value(&mut urdu, false, "English");
+                    ui.radio_value(&mut urdu, true, ui::rtl("اردو"));
+                    crate::i18n::set_urdu(urdu);
+                });
+                ui.end_row();
+                ui.label(RichText::new(ui::tr("Zoom")).strong());
+                ui.add(egui::Slider::new(&mut self.prefs.zoom, 0.5..=2.0).step_by(0.1).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                ui.end_row();
+                ui.label(RichText::new(ui::tr("Response layout")).strong());
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.prefs.stacked, false, ui::tr("Side by side"));
+                    ui.radio_value(&mut self.prefs.stacked, true, ui::tr("Stacked"));
+                });
+                ui.end_row();
+            });
+            ui.add_space(10.0);
+            ui.separator();
+            ui.label(RichText::new(ui::tr("Keyboard shortcuts")).strong());
+            egui::Grid::new("keys-grid").num_columns(2).striped(true).spacing([24.0, 4.0]).show(ui, |ui| {
+                for (action, keys) in SHORTCUTS {
+                    ui.label(ui::tr(action));
+                    ui.label(RichText::new(*keys).monospace().color(MUTED));
+                    ui.end_row();
+                }
+            });
+        });
+        if !open {
+            self.prefs_open = false;
+        }
+        if before != (self.prefs.clone(), crate::i18n::urdu()) {
+            self.save_state();
+        }
+    }
+
+    /// Ctrl+K: find any request in the open collections by name, URL or folder.
+    fn search_window(&mut self, ctx: &egui::Context) {
+        let Some((mut query, mut sel)) = self.search.take() else { return };
+        let q = query.to_lowercase();
+        let mut hits: Vec<(PathBuf, PathBuf, String, String, String, String)> = vec![];
+        fn walk(root: &Path, nodes: &[Node], folder: &str, out: &mut Vec<(PathBuf, PathBuf, String, String, String, String)>) {
+            for n in nodes {
+                match n {
+                    Node::Folder { name, children, .. } => walk(root, children, &if folder.is_empty() { name.clone() } else { format!("{folder} / {name}") }, out),
+                    Node::Request { name, method, kind, path } => out.push((root.to_path_buf(), path.clone(), name.clone(), method.clone(), kind.clone(), folder.to_string())),
+                }
+            }
+        }
+        for c in &self.collections {
+            walk(&c.root, &c.tree, &c.name, &mut hits);
+        }
+        hits.retain(|h| q.is_empty() || h.2.to_lowercase().contains(&q) || h.5.to_lowercase().contains(&q) || h.1.to_string_lossy().to_lowercase().contains(&q));
+        hits.truncate(50);
+        sel = sel.min(hits.len().saturating_sub(1));
+        let (up, down, enter, esc) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::NONE, Key::Escape)));
+        if up {
+            sel = sel.saturating_sub(1);
+        }
+        if down && sel + 1 < hits.len() {
+            sel += 1;
+        }
+        let mut open = None;
+        let mut keep = !esc;
+        let modal = egui::Modal::new(egui::Id::unique("search-modal")).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.add(TextEdit::singleline(&mut query).hint_text(ui::tr("Search requests by name, folder or path")).desired_width(f32::INFINITY).font(egui::TextStyle::Heading)).request_focus();
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                if hits.is_empty() {
+                    ui.label(RichText::new(ui::tr("No requests found")).color(MUTED));
+                }
+                for (i, (root, path, name, method, kind, folder)) in hits.iter().enumerate() {
+                    let r = tree_row(ui, 0, None, RichText::new(format!("{}    {folder}", ui::rtl(name))), Some(ui::method_tag(method, kind)), i == sel);
+                    if i == sel && (up || down) {
+                        r.scroll_to_me(None);
+                    }
+                    if r.clicked() || (enter && i == sel) {
+                        open = Some((root.clone(), path.clone()));
+                    }
+                }
+            });
+            ui.label(RichText::new(ui::tr("↑ ↓ to move · Enter to open · Esc to close")).color(MUTED).size(11.0));
+        });
+        if modal.should_close() {
+            keep = false;
+        }
+        if let Some((root, path)) = open {
+            for dir in path.ancestors().skip(1).take_while(|d| d.starts_with(&root)) {
+                self.expanded.insert(dir.to_path_buf());
+            }
+            self.open_request(&root, &path);
+            keep = false;
+        }
+        if keep {
+            if query.to_lowercase() != q {
+                sel = 0;
+            }
+            self.search = Some((query, sel));
+        }
+    }
     fn generate_code(&mut self, path: &Path) {
         let Some(root) = self.tabs.get(self.active).map(|t| t.root.clone()) else { return };
         let r = self.current_request(path).and_then(|req| {
             let job = self.job_for(&root, path, &req).ok_or("collection not open".to_string())?;
-            exec::prepare(&job).map(|p| (req.name, crate::curl::to_curl(&p)))
+            exec::prepare(&job).map(|p| (req.name, p))
         });
         match r {
-            Ok((name, code)) => self.code_window = Some((format!("Generate code · {name}"), code)),
+            Ok((name, p)) => self.code_window = Some((format!("Generate code · {name}"), p)),
             Err(e) => self.status = format!("Cannot generate code: {e}"),
         }
     }
 
     fn code_window(&mut self, ctx: &egui::Context) {
-        let Some((title, code)) = self.code_window.clone() else { return };
+        let Some((title, prepared)) = self.code_window.clone() else { return };
+        let lang = crate::codegen::LANGUAGES.get(self.prefs.code_lang).copied().unwrap_or("Shell - cURL");
+        let code = crate::codegen::generate(lang, &prepared);
         let mut open = true;
-        egui::Window::new("Generate Code")
+        egui::Window::new(ui::tr("Generate Code"))
             .id(egui::Id::unique("code-window"))
             .collapsible(false)
             .pivot(egui::Align2::CENTER_CENTER)
@@ -2652,13 +3141,25 @@ impl ZenApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui::primary_button(ui, "Copy").clicked() {
                         ui.ctx().copy_text(code.clone());
-                        self.status = "cURL command copied to clipboard".into();
+                        self.status = format!("{lang} snippet copied to clipboard");
                     }
-                    ui.label(RichText::new("Shell: bash").color(MUTED));
                 });
             });
-            ui.label(RichText::new("Variables are resolved with the selected environment; scripts are not run.").color(MUTED).size(12.0));
-            egui::ScrollArea::vertical().show(ui, |ui| ui::code_view(ui, &code));
+            ui.label(RichText::new(ui::tr("Variables are resolved with the selected environment; scripts are not run.")).color(MUTED).size(12.0));
+            ui.add_space(4.0);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(170.0);
+                    for (i, l) in crate::codegen::LANGUAGES.iter().enumerate() {
+                        if ui.add_sized([170.0, 24.0], egui::Button::selectable(self.prefs.code_lang == i, *l)).clicked() {
+                            self.prefs.code_lang = i;
+                            self.save_state();
+                        }
+                    }
+                });
+                ui.separator();
+                egui::ScrollArea::both().max_height(460.0).show(ui, |ui| ui::code_view(ui, &code));
+            });
         });
         if !open {
             self.code_window = None;
@@ -2818,7 +3319,7 @@ fn load_view(ui: &mut egui::Ui, l: &mut LoadTab) -> bool {
     ui.horizontal_top(|ui| {
     ui.allocate_ui_with_layout(egui::vec2(270.0, height), egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.set_width(270.0);
-        ui.label(RichText::new("⚡ Load Test").strong().size(15.0));
+        ui.label(RichText::new(format!("{} {}", icons::LIGHTNING, ui::tr("Load Test"))).strong().size(15.0));
         ui.horizontal(|ui| {
             ui.label(ui::method_tag(&l.method, "http"));
             ui.label(&l.name);
@@ -2841,7 +3342,7 @@ fn load_view(ui: &mut egui::Ui, l: &mut LoadTab) -> bool {
         ui.horizontal(|ui| {
             if running {
                 ui.spinner();
-                if ui.button("Stop").clicked() {
+                if ui.button(ui::tr("Stop")).clicked() {
                     l.stop.store(true, Ordering::Relaxed);
                 }
             } else if ui::primary_button(ui, "Start load test").clicked() {
@@ -2849,7 +3350,7 @@ fn load_view(ui: &mut egui::Ui, l: &mut LoadTab) -> bool {
             }
         });
         ui.add_space(10.0);
-        ui.label(RichText::new("The request is prepared once with the selected environment and current runtime variables, then replayed by every user over shared keep-alive connections. Scripts, vars and assertions are not re-run per request. A request fails on a network error or an HTTP status ≥ 400.").color(MUTED).size(11.5));
+        ui.label(RichText::new(ui::tr("The request is prepared once with the selected environment and current runtime variables, then replayed by every user over shared keep-alive connections. Scripts, vars and assertions are not re-run per request. A request fails on a network error or an HTTP status ≥ 400.")).color(MUTED).size(11.5));
         if let Some(e) = &l.error {
             ui.add_space(6.0);
             ui.colored_label(RED, e);
@@ -2862,7 +3363,7 @@ fn load_view(ui: &mut egui::Ui, l: &mut LoadTab) -> bool {
         if l.stats.total == 0 && !running {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Configure the test on the left and press Start.").color(MUTED));
+                ui.label(RichText::new(ui::tr("Configure the test on the left and press Start.")).color(MUTED));
             });
             return;
         }
@@ -2876,7 +3377,7 @@ fn load_view(ui: &mut egui::Ui, l: &mut LoadTab) -> bool {
             let elapsed = l.elapsed;
             let tile_w = ((width - 20.0) / 4.0 - 34.0).max(90.0);
             let rate = st.error_rate();
-            let note = if st.failed == 0 { RichText::new("no failures").color(GREEN).size(11.0) } else { RichText::new(format!("× {} failed", st.failed)).color(RED).size(11.0) };
+            let note = if st.failed == 0 { RichText::new(ui::tr("no failures")).color(GREEN).size(11.0) } else { RichText::new(format!("× {} failed", st.failed)).color(RED).size(11.0) };
             let tiles = [
                 ("Requests", fmt_num(st.total as f64), Some(RichText::new(format!("{:.1}s elapsed", elapsed.as_secs_f64())).color(MUTED).size(11.0))),
                 ("Throughput", format!("{}/s", fmt_num(st.rps(elapsed))), None),
@@ -2897,7 +3398,7 @@ fn load_view(ui: &mut egui::Ui, l: &mut LoadTab) -> bool {
             });
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Requests per second").strong());
+                ui.label(RichText::new(ui::tr("Requests per second")).strong());
                 ui.add_space(12.0);
                 legend_item(ui, SERIES_1, "OK");
                 legend_item(ui, RED, "× Failed");
@@ -2905,7 +3406,7 @@ fn load_view(ui: &mut egui::Ui, l: &mut LoadTab) -> bool {
             throughput_chart(ui, width - 20.0, &st.seconds);
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Response time").strong());
+                ui.label(RichText::new(ui::tr("Response time")).strong());
                 ui.add_space(12.0);
                 legend_item(ui, SERIES_1, "avg");
                 legend_item(ui, SERIES_2, "p95");
@@ -2913,7 +3414,7 @@ fn load_view(ui: &mut egui::Ui, l: &mut LoadTab) -> bool {
             latency_chart(ui, width - 20.0, &st.seconds);
             ui.add_space(10.0);
             ui.columns(2, |cols| {
-                cols[0].label(RichText::new("Status codes").strong());
+                cols[0].label(RichText::new(ui::tr("Status codes")).strong());
                 egui::Grid::new("load-status").striped(true).num_columns(3).show(&mut cols[0], |ui| {
                     for (code, count) in &st.statuses {
                         ui.label(RichText::new(code.to_string()).color(ui::status_color(*code)).strong());
@@ -2922,12 +3423,12 @@ fn load_view(ui: &mut egui::Ui, l: &mut LoadTab) -> bool {
                         ui.end_row();
                     }
                 });
-                cols[1].label(RichText::new("Errors").strong());
+                cols[1].label(RichText::new(ui::tr("Errors")).strong());
                 if st.errors.is_empty() {
-                    cols[1].label(RichText::new("None").color(MUTED));
+                    cols[1].label(RichText::new(ui::tr("None")).color(MUTED));
                 }
                 for (e, count) in &st.errors {
-                    cols[1].label(RichText::new(format!("✖ {count} × {e}")).color(RED).size(12.0));
+                    cols[1].label(RichText::new(format!("{} {count} × {e}", icons::X_CIRCLE)).color(RED).size(12.0));
                 }
             });
             ui.add_space(10.0);
